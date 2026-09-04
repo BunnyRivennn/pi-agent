@@ -31,11 +31,11 @@ from .types import (
 
 
 def agent_loop(
-    prompts: list[AgentMessage],
-    context: AgentContext,
-    config: AgentLoopConfig,
-    abort_event: asyncio.Event | None = None,
-    stream_fn: StreamFn | None = None,
+        prompts: list[AgentMessage],
+        context: AgentContext,
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None = None,
+        stream_fn: StreamFn | None = None,
 ) -> EventStream[AgentEvent, list[AgentMessage]]:
     stream = _create_agent_stream()
 
@@ -61,10 +61,10 @@ def agent_loop(
 
 
 def agent_loop_continue(
-    context: AgentContext,
-    config: AgentLoopConfig,
-    abort_event: asyncio.Event | None = None,
-    stream_fn: StreamFn | None = None,
+        context: AgentContext,
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None = None,
+        stream_fn: StreamFn | None = None,
 ) -> EventStream[AgentEvent, list[AgentMessage]]:
     if not context.messages:
         raise ValueError("Cannot continue: no messages in context")
@@ -99,12 +99,12 @@ def _create_agent_stream() -> EventStream[AgentEvent, list[AgentMessage]]:
 
 
 async def _run_loop(
-    current_context: AgentContext,
-    new_messages: list[AgentMessage],
-    config: AgentLoopConfig,
-    abort_event: asyncio.Event | None,
-    stream: EventStream[AgentEvent, list[AgentMessage]],
-    stream_fn: StreamFn | None,
+        current_context: AgentContext,
+        new_messages: list[AgentMessage],
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None,
+        stream: EventStream[AgentEvent, list[AgentMessage]],
+        stream_fn: StreamFn | None,
 ) -> None:
     first_turn = True
     pending_messages = await _maybe_get_messages(config.get_steering_messages)
@@ -181,11 +181,11 @@ async def _run_loop(
 
 
 async def _stream_assistant_response(
-    context: AgentContext,
-    config: AgentLoopConfig,
-    abort_event: asyncio.Event | None,
-    stream: EventStream[AgentEvent, list[AgentMessage]],
-    stream_fn: StreamFn | None,
+        context: AgentContext,
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None,
+        stream: EventStream[AgentEvent, list[AgentMessage]],
+        stream_fn: StreamFn | None,
 ) -> AssistantMessage:
     messages = context.messages
     if config.transform_context:
@@ -264,11 +264,11 @@ async def _stream_assistant_response(
 
 
 async def _execute_tool_calls(
-    tools: list[AgentTool] | None,
-    assistant_message: AssistantMessage,
-    abort_event: asyncio.Event | None,
-    stream: EventStream[AgentEvent, list[AgentMessage]],
-    get_steering_messages: GetMessagesFn | None,
+        tools: list[AgentTool] | None,
+        assistant_message: AssistantMessage,
+        abort_event: asyncio.Event | None,
+        stream: EventStream[AgentEvent, list[AgentMessage]],
+        get_steering_messages: GetMessagesFn | None,
 ) -> dict[str, Any]:
     tool_calls = assistant_tool_calls(assistant_message)
     results: list[ToolResultMessage] = []
@@ -302,11 +302,11 @@ async def _execute_tool_calls(
             validated_args = _validate_tool_arguments(tool=tool, tool_call=tool_call)
 
             def on_update(
-                partial: AgentToolResult[Any],
-                *,
-                call_id: str = tool_call_id,
-                name: str = tool_name,
-                args: dict[str, Any] = tool_args,
+                    partial: AgentToolResult[Any],
+                    *,
+                    call_id: str = tool_call_id,
+                    name: str = tool_name,
+                    args: dict[str, Any] = tool_args,
             ) -> None:
                 stream.push(
                     {
@@ -354,7 +354,7 @@ async def _execute_tool_calls(
             steering = await _maybe_get_messages(get_steering_messages)
             if steering:
                 steering_messages = steering
-                for skipped_call in tool_calls[index + 1 :]:
+                for skipped_call in tool_calls[index + 1:]:
                     results.append(_skip_tool_call(skipped_call, stream))
                 break
 
@@ -362,8 +362,8 @@ async def _execute_tool_calls(
 
 
 def _skip_tool_call(
-    tool_call: ToolCall,
-    stream: EventStream[AgentEvent, list[AgentMessage]],
+        tool_call: ToolCall,
+        stream: EventStream[AgentEvent, list[AgentMessage]],
 ) -> ToolResultMessage:
     result: AgentToolResult[dict[str, Any]] = AgentToolResult(
         content=[TextContent(text="Skipped due to queued user message.")],
@@ -411,7 +411,7 @@ async def _maybe_await(value: T | Awaitable[T]) -> T:
 
 
 async def _maybe_get_messages(
-    getter: Callable[[], list[AgentMessage] | Awaitable[list[AgentMessage]]] | None,
+        getter: Callable[[], list[AgentMessage] | Awaitable[list[AgentMessage]]] | None,
 ) -> list[AgentMessage]:
     if getter is None:
         return []
@@ -421,9 +421,9 @@ async def _maybe_get_messages(
 
 
 def _validate_tool_arguments(
-    *,
-    tool: AgentTool,
-    tool_call: ToolCall,
+        *,
+        tool: AgentTool,
+        tool_call: ToolCall,
 ) -> dict[str, Any]:
     arguments: Any = tool_call.arguments
     if not isinstance(arguments, Mapping):
@@ -462,10 +462,10 @@ def _validation_error_path(error: ValidationError) -> str:
 
 
 def _format_tool_validation_error(
-    *,
-    tool_name: str,
-    args: Mapping[str, Any],
-    errors: list[ValidationError],
+        *,
+        tool_name: str,
+        args: Mapping[str, Any],
+        errors: list[ValidationError],
 ) -> str:
     lines = [f'Validation failed for tool "{tool_name}":']
     for error in errors:
