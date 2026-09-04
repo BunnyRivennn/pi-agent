@@ -4,6 +4,8 @@ import asyncio
 import os
 from typing import cast
 
+from dotenv import load_dotenv
+
 from pi_agent.agent_core import AssistantMessage, Model, TextContent, ToolCall
 from pi_agent.agent_core.types import (
     ErrorEvent,
@@ -12,6 +14,8 @@ from pi_agent.agent_core.types import (
     ToolCallEndEvent,
 )
 from pi_agent.pi_ai import create_default_registry, stream_simple
+
+load_dotenv()
 
 
 def extract_assistant_text(message: AssistantMessage) -> str:

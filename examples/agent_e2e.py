@@ -5,6 +5,8 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from dotenv import load_dotenv
+
 from pi_agent.agent_core import (
     Agent,
     AgentEvent,
@@ -16,6 +18,8 @@ from pi_agent.agent_core import (
 )
 from pi_agent.pi_ai import create_agent_stream_fn, create_default_registry
 
+load_dotenv()
+
 
 def extract_assistant_text(message: AssistantMessage) -> str:
     return " ".join(
@@ -24,10 +28,10 @@ def extract_assistant_text(message: AssistantMessage) -> str:
 
 
 async def get_weather(
-    tool_call_id: str,
-    params: Mapping[str, Any],
-    abort_event: asyncio.Event | None = None,
-    on_update: Callable[[AgentToolResult[Any]], None] | None = None,
+        tool_call_id: str,
+        params: Mapping[str, Any],
+        abort_event: asyncio.Event | None = None,
+        on_update: Callable[[AgentToolResult[Any]], None] | None = None,
 ) -> AgentToolResult[Any]:
     del tool_call_id, abort_event
     city = str(params.get("city", "Unknown"))
@@ -65,6 +69,9 @@ async def main() -> None:
             "OPENAI_API_KEY is not set. "
             "Set it and run `uv run python examples/agent_e2e.py`."
         )
+    else:
+        model_name = os.getenv("OPENAI_MODEL_NAME")
+        base_url = os.getenv("OPENAI_API_BASE_URL")
 
     registry = create_default_registry()
 
@@ -72,7 +79,8 @@ async def main() -> None:
         stream_fn=create_agent_stream_fn(registry),
         session_id="agent-e2e-demo",
     )
-    agent.set_model(Model(id="gpt-5-mini", provider="openai", api="openai"))
+    # agent.set_model(Model(id="gpt-5-mini", provider="openai", api="openai"))
+    agent.set_model(Model(id=model_name, provider="openai", api="openai", base_url=base_url))
     agent.set_system_prompt(
         "You are a concise assistant. Use get_weather when users ask weather questions."
     )
@@ -93,7 +101,6 @@ async def main() -> None:
     final_message = agent.state.messages[-1]
     if isinstance(final_message, AssistantMessage):
         print(f"\nFinal answer: {extract_assistant_text(final_message)}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
