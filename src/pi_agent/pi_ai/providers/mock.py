@@ -27,19 +27,19 @@ class MockProvider:
     _tool_call_counter: int = 0
 
     async def stream(
-        self,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None = None,
+            self,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None = None,
     ) -> AssistantStream:
         stream = AssistantMessageEventStream()
         asyncio.create_task(self._emit(stream, request, abort_event))
         return stream
 
     async def _emit(
-        self,
-        stream: AssistantMessageEventStream,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None,
+            self,
+            stream: AssistantMessageEventStream,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None,
     ) -> None:
         await asyncio.sleep(0)
 
@@ -110,12 +110,12 @@ class MockProvider:
         )
 
     def _assistant_message(
-        self,
-        *,
-        request: PiAIRequest,
-        content: list[AssistantContentBlock],
-        stop_reason: StopReason,
-        error_message: str | None = None,
+            self,
+            *,
+            request: PiAIRequest,
+            content: list[AssistantContentBlock],
+            stop_reason: StopReason,
+            error_message: str | None = None,
     ) -> AssistantMessage:
         return AssistantMessage(
             content=content,
@@ -132,6 +132,7 @@ class MockProvider:
         return f"tool-call-{self._tool_call_counter}"
 
 
+# 辅助函数
 def _find_latest_actionable_message(request: PiAIRequest) -> ActionableMessage | None:
     for message in reversed(request.context.messages):
         if isinstance(message, ToolResultMessage):
@@ -169,5 +170,5 @@ def _extract_city_from_prompt(prompt: str) -> str:
     if marker_index == -1:
         return "San Francisco"
 
-    city = prompt[marker_index + len(marker) :].strip(" ?.!")
+    city = prompt[marker_index + len(marker):].strip(" ?.!")
     return city.title() if city else "San Francisco"

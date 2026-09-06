@@ -10,6 +10,10 @@ from ..agent_core.types import AssistantStream, LlmContext, Model, ThinkingLevel
 
 @dataclass(slots=True, frozen=True)
 class PiAIRequest:
+    """
+    表示“一次模型请求”的完整信息。
+    它把调用模型所需的参数集中在一起
+    """
     model: Model
     context: LlmContext
     reasoning: ThinkingLevel | None = None
@@ -25,3 +29,22 @@ class Provider(Protocol):
         request: PiAIRequest,
         abort_event: asyncio.Event | None = None,
     ) -> AssistantStream: ...
+
+
+"""
+if __name__ == "__main__":
+
+    request = PiAIRequest(
+    model=Model(
+        id="gpt-5-mini",
+        provider="openai",
+        api="openai",
+    ),
+    context=context,
+    )
+
+    stream = await provider.stream(request)
+
+    async for event in stream:
+        print(event)
+"""
