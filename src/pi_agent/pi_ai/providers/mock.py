@@ -27,19 +27,22 @@ class MockProvider:
     _tool_call_counter: int = 0
 
     async def stream(
-        self,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None = None,
+            self,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None = None,
     ) -> AssistantStream:
+        # 建交换机(空壳建好，queue=[], future 未决)
         stream = AssistantMessageEventStream()
+        # 把它递给生产者
         asyncio.create_task(self._emit(stream, request, abort_event))
+        # 又递给消费者
         return stream
 
     async def _emit(
-        self,
-        stream: AssistantMessageEventStream,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None,
+            self,
+            stream: AssistantMessageEventStream,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None,
     ) -> None:
         await asyncio.sleep(0)
 
@@ -57,7 +60,7 @@ class MockProvider:
                 }
             )
             return
-
+        # 模拟LLM的输出（首次）
         assistant_message = self._build_assistant_message(request)
         done_reason: Literal["stop", "toolUse"] = (
             "toolUse" if assistant_message.stop_reason == "toolUse" else "stop"
@@ -71,6 +74,7 @@ class MockProvider:
         )
 
     def _build_assistant_message(self, request: PiAIRequest) -> AssistantMessage:
+        """模拟大模型的输出（包括Tool的使用）"""
         latest_actionable_message = _find_latest_actionable_message(request)
 
         if isinstance(latest_actionable_message, ToolResultMessage):
@@ -110,12 +114,12 @@ class MockProvider:
         )
 
     def _assistant_message(
-        self,
-        *,
-        request: PiAIRequest,
-        content: list[AssistantContentBlock],
-        stop_reason: StopReason,
-        error_message: str | None = None,
+            self,
+            *,
+            request: PiAIRequest,
+            content: list[AssistantContentBlock],
+            stop_reason: StopReason,
+            error_message: str | None = None,
     ) -> AssistantMessage:
         return AssistantMessage(
             content=content,
@@ -132,6 +136,7 @@ class MockProvider:
         return f"tool-call-{self._tool_call_counter}"
 
 
+# 辅助函数
 def _find_latest_actionable_message(request: PiAIRequest) -> ActionableMessage | None:
     for message in reversed(request.context.messages):
         if isinstance(message, ToolResultMessage):
@@ -169,5 +174,5 @@ def _extract_city_from_prompt(prompt: str) -> str:
     if marker_index == -1:
         return "San Francisco"
 
-    city = prompt[marker_index + len(marker) :].strip(" ?.!")
+    city = prompt[marker_index + len(marker):].strip(" ?.!")
     return city.title() if city else "San Francisco"

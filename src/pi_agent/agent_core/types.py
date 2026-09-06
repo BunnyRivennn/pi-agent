@@ -323,16 +323,26 @@ AssistantMessageEvent: TypeAlias = (
 
 
 class AssistantStream(Protocol):
+    """逐条读取流式事件"""
     def __aiter__(self) -> AsyncIterator[AssistantMessageEvent]: ...
 
     async def result(self) -> AssistantMessage: ...
+    """获取最终完整回答"""
 
 
 StreamFn: TypeAlias = Callable[
     [Model, LlmContext, AgentLoopConfig, asyncio.Event | None],
     AssistantStream | Awaitable[AssistantStream],
 ]
-
+"""
+async def stream_fn(
+    model: Model,
+    context: LlmContext,
+    config: AgentLoopConfig,
+    abort_event: asyncio.Event | None,
+) -> AssistantStream:
+    ...
+"""
 
 # ---------------------------------------------------------------------------
 # Agent lifecycle events

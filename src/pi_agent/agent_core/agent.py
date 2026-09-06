@@ -54,14 +54,19 @@ class Agent:
         initial_state: AgentState | None = None,
         convert_to_llm: ConvertToLlmFn | None = None,
         transform_context: TransformContextFn | None = None,
+        # 引导队列（往引导队列塞消息，控制 Agent 的行为方向）
+        # 支持两种模式："one-at-a-time"（一次一条）或 "all"（一次性全部）
         steering_mode: LiteralMode = "one-at-a-time",
+        # 跟进队列（往跟进队列塞消息，补充上下文）
         follow_up_mode: LiteralMode = "one-at-a-time",
+        # 定义了流式函数
         stream_fn: StreamFn | None = None,
         session_id: str | None = None,
         get_api_key: GetApiKeyFn | None = None,
         thinking_budgets: Mapping[str, int] | None = None,
         max_retry_delay_ms: int | None = None,
     ) -> None:
+        # 管理Agent的状态
         self._state = (
             self._clone_state(initial_state)
             if initial_state
@@ -128,9 +133,14 @@ class Agent:
         self._max_retry_delay_ms = value
 
     def subscribe(self, listener: Listener) -> Callable[[], None]:
+        """
+        订阅-取消订阅模式在这个 Agent 框架里，主要是为了对外暴露 Agent 的运行过程，让外部代码能实时感知 Agent 内部发生了什么。
+        有了订阅，外部就能实时监听每一个事件。
+        """
         self._listeners.add(listener)
 
         def _unsubscribe() -> None:
+            # 移除集合中的指定元素
             self._listeners.discard(listener)
 
         return _unsubscribe
@@ -157,6 +167,7 @@ class Agent:
         self._state.messages = []
 
     def reset(self) -> None:
+        """重置状态"""
         self._state.messages = []
         self._state.is_streaming = False
         self._state.stream_message = None
@@ -194,10 +205,12 @@ class Agent:
         return self._follow_up_mode
 
     def abort(self) -> None:
+        """中止当前对话"""
         if self._abort_event is not None:
             self._abort_event.set()
 
     async def wait_for_idle(self) -> None:
+        """等待当前任务完成"""
         if self._running_task is not None:
             await self._running_task
 
@@ -206,6 +219,7 @@ class Agent:
         input_value: str | AgentMessage | list[AgentMessage],
         images: Sequence[ImageContent] | None = None,
     ) -> None:
+        """发起一轮对话"""
         if self._state.is_streaming:
             raise RuntimeError(
                 "Agent is already processing a prompt. Use steer() or "
@@ -226,6 +240,7 @@ class Agent:
         await self._run_loop(messages)
 
     async def continue_(self) -> None:
+        """继续上一轮对话"""
         if self._state.is_streaming:
             raise RuntimeError(
                 "Agent is already processing. Wait for completion before continuing."
@@ -240,10 +255,19 @@ class Agent:
         await self._run_loop(None)
 
     async def _run_loop(self, messages: list[AgentMessage] | None) -> None:
+        # 1. 创建任务
         self._running_task = asyncio.create_task(self._execute(messages))
+
+        # 2. 在这里等着，啥也不干
         try:
             await self._running_task
+            """
+            # ↑ 程序停在这里
+            # 等 _execute 里面所有的循环、工具调用、事件处理全部完成
+            # 才继续往下走
+            """
         finally:
+            # 3. _execute 结束后，才执行到这里
             self._running_task = None
 
     async def _execute(self, messages: list[AgentMessage] | None) -> None:
@@ -252,6 +276,7 @@ class Agent:
         self._state.stream_message = None
         self._state.error = None
 
+        # 1. 创建上下文
         context = AgentContext(
             system_prompt=self._state.system_prompt,
             messages=list(self._state.messages),
@@ -275,13 +300,16 @@ class Agent:
             if self.stream_fn is None:
                 raise RuntimeError("No stream_fn configured")
 
+            # 2. 获取事件流（生产者）
             stream = (
                 agent_loop(messages, context, config, self._abort_event, self.stream_fn)
                 if messages is not None
                 else agent_loop_continue(context, config, self._abort_event, self.stream_fn)
             )
 
+            # 3. 消费事件流（消费者）
             async for event in stream:
+                # 处理各种事件类型
                 event_type = event["type"]
 
                 if event_type in {"message_start", "message_update"}:
@@ -311,6 +339,7 @@ class Agent:
                     self._state.is_streaming = False
                     self._state.stream_message = None
 
+                # 通知所有监听器（广播给订阅者）
                 self._emit(event)
 
         except Exception as exc:  # noqa: BLE001

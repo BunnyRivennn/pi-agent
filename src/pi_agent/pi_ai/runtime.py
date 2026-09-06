@@ -34,7 +34,7 @@ async def stream(
     max_retry_delay_ms: int | None = None,
     abort_event: asyncio.Event | None = None,
 ) -> AssistantStream:
-    provider = registry.resolve(model)
+    provider = registry.resolve(model)  # 或者provider
     request = PiAIRequest(
         model=model,
         context=context,
@@ -140,6 +140,10 @@ async def complete_simple(
 
 
 def create_agent_stream_fn(registry: ProviderRegistry) -> StreamFn:
+    """
+    闭包——_stream_fn 记住了外层的 registry 变量。
+    工厂函数不立即执行 _stream_fn，只是返回它。等到 Agent 真正需要调用时才会执行。
+    """
     async def _stream_fn(
         model: Model,
         context: LlmContext,

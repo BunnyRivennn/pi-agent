@@ -106,19 +106,54 @@ async def _run_loop(
         stream: EventStream[AgentEvent, list[AgentMessage]],
         stream_fn: StreamFn | None,
 ) -> None:
+    """事件流里的事件 生产者：作用：决定"要不要再调一次 LLM" """
+    """
+    current_context：当前的对话上下文（系统提示、消息列表、工具列表）
+
+    new_messages：本轮新增的消息（最终会作为结果返回）
+    
+    config：配置（模型、API Key、转换函数等）
+    
+    abort_event：中止信号
+    
+    stream：事件流（往里面 push 事件）
+    
+    stream_fn：调用 LLM 的函数
+    
+    两层 while：
+    外层：处理"follow-up"（追问）
+    内层：处理"tool call"（工具调用链
+    
+    follow_up 是一个"延迟投递的收件箱"，决定消息在哪个 turn 进入上下文；
+    消息一旦被消费、append 进 current_context.messages，它才融入那份裸的短期记忆。 
+    它和 steering 共同构成了 Agent 的并发输入调度
+    """
+
     first_turn = True
+    # 第一步：获取 steering 消息：是人为插入的引导消息。
+    # 每次 LLM 调用前，都会先塞这条消息进去。
     pending_messages = await _maybe_get_messages(config.get_steering_messages)
 
     while True:
+        """
+        外层循环只做一件事：检查有没有 follow-up 消息。
+        有 → 继续循环
+        没有 → break
+        """
         has_more_tool_calls = True
         steering_after_tools: list[AgentMessage] | None = None
 
+        # 一个 turn：模型说话 + 工具链
         while has_more_tool_calls or pending_messages:
+            # steering 在这个内层循环的开头/工具后被消化（插队进当前 turn）
+
+            # 1. 如果不是第一轮，push turn_start
             if not first_turn:
                 stream.push({"type": "turn_start"})
             else:
                 first_turn = False
 
+            # 2. 如果有 pending 消息，先处理它们
             if pending_messages:
                 for message in pending_messages:
                     stream.push({"type": "message_start", "message": message})
@@ -127,6 +162,7 @@ async def _run_loop(
                     new_messages.append(message)
                 pending_messages = []
 
+            # 3. 调 LLM → 得到 assistant_message
             message = await _stream_assistant_response(
                 current_context,
                 config,
@@ -136,12 +172,13 @@ async def _run_loop(
             )
             new_messages.append(message)
 
+            # 4. 检查 LLM 的返回状态
             if message.stop_reason in {"error", "aborted"}:
                 stream.push({"type": "turn_end", "message": message, "tool_results": []})
                 stream.push({"type": "agent_end", "messages": new_messages})
                 stream.end(new_messages)
                 return
-
+            # 5. 检查是否有 tool call
             tool_calls = assistant_tool_calls(message)
             has_more_tool_calls = len(tool_calls) > 0
 
@@ -172,9 +209,9 @@ async def _run_loop(
         follow_up_messages = await _maybe_get_messages(config.get_follow_up_messages)
         if follow_up_messages:
             pending_messages = follow_up_messages
-            continue
+            continue  # ← 模型以为下班了，发现队列里还有活，开新 turn
 
-        break
+        break         # ← 真没活了，agent_end
 
     stream.push({"type": "agent_end", "messages": new_messages})
     stream.end(new_messages)
@@ -186,18 +223,25 @@ async def _stream_assistant_response(
         abort_event: asyncio.Event | None,
         stream: EventStream[AgentEvent, list[AgentMessage]],
         stream_fn: StreamFn | None,
-) -> AssistantMessage:
+) -> AssistantMessage: # LLM 的完整回复
+    """调 LLM → 消费事件流 → 把 LLM 的回复放入上下文 → 返回最终的 AssistantMessage"""
+
+    # 1. 准备消息（可能经过 transform_context 转换）
     messages = context.messages
     if config.transform_context:
         messages = await config.transform_context(messages, abort_event)
 
+    # 2. 把消息转换成 LLM 能理解的格式
     llm_messages = await _maybe_await(config.convert_to_llm(messages))
+
+    # 3. 构造 LLM 上下文
     llm_context = LlmContext(
         system_prompt=context.system_prompt,
         messages=llm_messages,
         tools=context.tools,
     )
 
+    # 4. 获取 stream_fn（调 LLM 的函数）
     stream_function = stream_fn
     if stream_function is None:
         raise RuntimeError("stream_fn is required")
@@ -206,7 +250,7 @@ async def _stream_assistant_response(
         resolved_key = await _maybe_await(config.get_api_key(config.model.provider))
         if resolved_key is not None:
             config = replace(config, api_key=resolved_key)
-
+    # 6. 调 LLM → 得到事件流
     response = await _maybe_await(stream_function(config.model, llm_context, config, abort_event))
 
     partial_message: AssistantMessage | None = None
@@ -270,6 +314,7 @@ async def _execute_tool_calls(
         stream: EventStream[AgentEvent, list[AgentMessage]],
         get_steering_messages: GetMessagesFn | None,
 ) -> dict[str, Any]:
+    """遍历 tool call → 找工具 → 执行 → 推事件 → 处理插话"""
     tool_calls = assistant_tool_calls(assistant_message)
     results: list[ToolResultMessage] = []
     steering_messages: list[AgentMessage] | None = None
@@ -298,7 +343,7 @@ async def _execute_tool_calls(
         try:
             if tool is None:
                 raise RuntimeError(f"Tool {tool_name} not found")
-
+            # 验证参数
             validated_args = _validate_tool_arguments(tool=tool, tool_call=tool_call)
 
             def on_update(
@@ -318,6 +363,7 @@ async def _execute_tool_calls(
                     }
                 )
 
+            # 真的执行工具
             result = await tool.execute(
                 tool_call_id,
                 validated_args,

@@ -73,6 +73,13 @@ async def main() -> None:
         model_name = os.getenv("OPENAI_MODEL_NAME")
         base_url = os.getenv("OPENAI_API_BASE_URL")
 
+    # responses → OpenAI Responses API (official OpenAI)
+    # completions → Chat Completions-compatible gateways (e.g. Volcengine Ark;
+    #               its Responses SSE omits response.output in response.created,
+    #               which crashes the openai SDK snapshot accumulator)
+    style = os.getenv("OPENAI_API_STYLE", "responses").lower()
+    provider_name = "openai-completions" if style == "completions" else "openai"
+
     registry = create_default_registry()
 
     agent = Agent(
@@ -80,7 +87,9 @@ async def main() -> None:
         session_id="agent-e2e-demo",
     )
     # agent.set_model(Model(id="gpt-5-mini", provider="openai", api="openai"))
-    agent.set_model(Model(id=model_name, provider="openai", api="openai", base_url=base_url))
+    agent.set_model(
+        Model(id=model_name, provider=provider_name, api=provider_name, base_url=base_url)
+    )
     agent.set_system_prompt(
         "You are a concise assistant. Use get_weather when users ask weather questions."
     )
@@ -91,6 +100,13 @@ async def main() -> None:
                 label="Get Weather",
                 description="Returns a weather string for a city.",
                 execute=get_weather,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "City name, e.g. Paris"},
+                    },
+                    "required": ["city"],
+                },
             )
         ]
     )

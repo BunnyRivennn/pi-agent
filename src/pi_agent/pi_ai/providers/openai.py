@@ -134,6 +134,11 @@ class _OpenAIStreamingState:
     tool_indices: dict[str, int] = field(default_factory=dict)
     closed_tool_call_ids: set[str] = field(default_factory=set)
     tool_arg_buffers: dict[str, str] = field(default_factory=dict)
+    # Some providers (e.g. DeepSeek) identify function-call items by two different
+    # ids: the item snapshot carries call_id ("call_...") while the
+    # function_call_arguments.delta/done events only carry item_id (the item's
+    # UUID "id"). Map the latter to the former so deltas land on the real ToolCall.
+    tool_item_id_to_call_id: dict[str, str] = field(default_factory=dict)
 
 
 def _push_terminal_message(
@@ -341,9 +346,10 @@ def _apply_openai_stream_event(
             "function_call_arguments.delta",
         ),
     ):
-        call_id = _event_call_id(event)
-        if not call_id:
+        event_tool_id = _event_call_id(event)
+        if not event_tool_id:
             return False
+        call_id = state.tool_item_id_to_call_id.get(event_tool_id, event_tool_id)
 
         content_index = _ensure_tool_call(
             state=state,
@@ -374,9 +380,10 @@ def _apply_openai_stream_event(
             "function_call_arguments.done",
         ),
     ):
-        call_id = _event_call_id(event)
-        if not call_id:
+        event_tool_id = _event_call_id(event)
+        if not event_tool_id:
             return False
+        call_id = state.tool_item_id_to_call_id.get(event_tool_id, event_tool_id)
 
         content_index = _ensure_tool_call(
             state=state,
@@ -452,6 +459,9 @@ def _apply_output_item(
         call_id = _as_str(item.get("call_id")) or _as_str(item.get("id"))
         if not call_id:
             return
+        item_id = _as_str(item.get("id"))
+        if item_id and item_id != call_id:
+            state.tool_item_id_to_call_id[item_id] = call_id
         content_index = _ensure_tool_call(
             state=state,
             stream=stream,

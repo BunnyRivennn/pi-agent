@@ -20,9 +20,13 @@ class EventStream(Generic[TEvent, TResult]):
     ) -> None:
         self._is_complete = is_complete
         self._extract_result = extract_result
+        # ① 事件管道：生产者 push，消费者 get
         self._queue: asyncio.Queue[object] = asyncio.Queue()
+        # ② 终态标记：一旦完成，拒收新事件
         self._done = False
+        # ③ 哨兵：一个独一无二的对象，当"流结束了"的信号
         self._sentinel = object()
+        # ④ 信箱：终态结果放这里，await 它就能拿到
         self._result_future: asyncio.Future[TResult] = asyncio.get_event_loop().create_future()
 
     def push(self, event: TEvent) -> None:
@@ -62,7 +66,7 @@ class EventStream(Generic[TEvent, TResult]):
         return self
 
     async def __anext__(self) -> TEvent:
-        item = await self._queue.get()
+        item = await self._queue.get()  # 拿到了哨兵（sentinel）
         if item is self._sentinel:
             raise StopAsyncIteration
         return item  # type: ignore[return-value]
@@ -72,6 +76,9 @@ class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMe
     """EventStream specialization for assistant streaming events."""
 
     def __init__(self) -> None:
+        """
+        遇到 done 或 error 类型的事件，就认定流到头了
+        """
         super().__init__(
             is_complete=lambda event: event["type"] in {"done", "error"},
             extract_result=_extract_assistant_result,
