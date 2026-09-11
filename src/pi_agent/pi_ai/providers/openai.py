@@ -30,6 +30,14 @@ from ...agent_core.types import (
 )
 from ..types import PiAIRequest
 
+"""
+入口：OpenAI 的原始 SSE 事件
+    ↓
+出口：AssistantMessageEventStream 的标准事件
+    ↓
+回到 _stream_assistant_response 的 async for 里消费
+"""
+
 DoneReason = Literal["stop", "length", "toolUse"]
 OpenAIRequestFn: TypeAlias = Callable[
     [dict[str, Any], str, str | None],
@@ -49,19 +57,19 @@ class OpenAIResponsesProvider:
     api_key_env: str = "OPENAI_API_KEY"
 
     async def stream(
-        self,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None = None,
+            self,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None = None,
     ) -> AssistantStream:
         stream = AssistantMessageEventStream()
         asyncio.create_task(self._emit(stream, request, abort_event))
         return stream
 
     async def _emit(
-        self,
-        stream: AssistantMessageEventStream,
-        request: PiAIRequest,
-        abort_event: asyncio.Event | None,
+            self,
+            stream: AssistantMessageEventStream,
+            request: PiAIRequest,
+            abort_event: asyncio.Event | None,
     ) -> None:
         await asyncio.sleep(0)
 
@@ -142,8 +150,8 @@ class _OpenAIStreamingState:
 
 
 def _push_terminal_message(
-    stream: AssistantMessageEventStream,
-    message: AssistantMessage,
+        stream: AssistantMessageEventStream,
+        message: AssistantMessage,
 ) -> None:
     if message.stop_reason in {"error", "aborted"}:
         stream.push(
@@ -165,16 +173,17 @@ def _push_terminal_message(
 
 
 async def _consume_openai_event_stream(
-    *,
-    stream: AssistantMessageEventStream,
-    model: Model,
-    events: AsyncIterator[Mapping[str, Any]],
+        *,
+        stream: AssistantMessageEventStream,
+        model: Model,
+        events: AsyncIterator[Mapping[str, Any]],
 ) -> None:
+    """消费原始流，翻译成框架事件"""
     state = _OpenAIStreamingState(partial=_new_partial_message(model))
     stream.push({"type": "start", "partial": state.partial})
 
     completed = False
-    async for raw_event in events:
+    async for raw_event in events:  # 这里的events是llm的输出（yield）
         event = _event_to_mapping(raw_event)
         completed = _apply_openai_stream_event(
             stream=stream,
@@ -195,21 +204,22 @@ async def _consume_openai_event_stream(
 
 
 def _apply_openai_stream_event(
-    *,
-    stream: AssistantMessageEventStream,
-    model: Model,
-    state: _OpenAIStreamingState,
-    event: Mapping[str, Any],
+        *,
+        stream: AssistantMessageEventStream,
+        model: Model,
+        state: _OpenAIStreamingState,
+        event: Mapping[str, Any],
 ) -> bool:
+    """处理单个事件的分发器"""
     event_type = _as_str(event.get("type")) or ""
 
     if _event_type_matches(
-        event_type,
-        (
-            "response.output_text.delta",
-            "response.text.delta",
-            "output_text.delta",
-        ),
+            event_type,
+            (
+                    "response.output_text.delta",
+                    "response.text.delta",
+                    "output_text.delta",
+            ),
     ):
         delta = _as_str(event.get("delta")) or ""
         if not delta:
@@ -231,14 +241,14 @@ def _apply_openai_stream_event(
             }
         )
         return False
-
+    # llm的流式输出结尾
     if _event_type_matches(
-        event_type,
-        (
-            "response.output_text.done",
-            "response.text.done",
-            "output_text.done",
-        ),
+            event_type,
+            (
+                    "response.output_text.done",
+                    "response.text.done",
+                    "output_text.done",
+            ),
     ):
         content_index = _ensure_text_block(
             state=state,
@@ -253,8 +263,8 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        ("response.output_item.added", "output_item.added"),
+            event_type,
+            ("response.output_item.added", "output_item.added"),
     ):
         item = event.get("item") or event.get("output_item")
         if isinstance(item, Mapping):
@@ -268,8 +278,8 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        ("response.output_item.done", "output_item.done"),
+            event_type,
+            ("response.output_item.done", "output_item.done"),
     ):
         item = event.get("item") or event.get("output_item")
         if isinstance(item, Mapping):
@@ -283,13 +293,13 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        (
-            "response.reasoning_summary_text.delta",
-            "response.reasoning_text.delta",
-            "reasoning_summary_text.delta",
-            "reasoning_text.delta",
-        ),
+            event_type,
+            (
+                    "response.reasoning_summary_text.delta",
+                    "response.reasoning_text.delta",
+                    "reasoning_summary_text.delta",
+                    "reasoning_text.delta",
+            ),
     ):
         delta = _as_str(event.get("delta")) or ""
         if not delta:
@@ -313,11 +323,11 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        (
-            "response.reasoning_summary_part.done",
-            "reasoning_summary_part.done",
-        ),
+            event_type,
+            (
+                    "response.reasoning_summary_part.done",
+                    "reasoning_summary_part.done",
+            ),
     ):
         content_index = _ensure_thinking_block(
             state=state,
@@ -339,12 +349,12 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        (
-            "response.function_call_arguments.delta",
-            "response.output_item.function_call_arguments.delta",
-            "function_call_arguments.delta",
-        ),
+            event_type,
+            (
+                    "response.function_call_arguments.delta",
+                    "response.output_item.function_call_arguments.delta",
+                    "function_call_arguments.delta",
+            ),
     ):
         event_tool_id = _event_call_id(event)
         if not event_tool_id:
@@ -360,7 +370,7 @@ def _apply_openai_stream_event(
         delta = _as_str(event.get("delta")) or ""
         if delta:
             state.tool_arg_buffers[call_id] = (
-                state.tool_arg_buffers.get(call_id, "") + delta
+                    state.tool_arg_buffers.get(call_id, "") + delta
             )
             stream.push(
                 {
@@ -373,12 +383,12 @@ def _apply_openai_stream_event(
         return False
 
     if _event_type_matches(
-        event_type,
-        (
-            "response.function_call_arguments.done",
-            "response.output_item.function_call_arguments.done",
-            "function_call_arguments.done",
-        ),
+            event_type,
+            (
+                    "response.function_call_arguments.done",
+                    "response.output_item.function_call_arguments.done",
+                    "function_call_arguments.done",
+            ),
     ):
         event_tool_id = _event_call_id(event)
         if not event_tool_id:
@@ -396,6 +406,7 @@ def _apply_openai_stream_event(
             call_id,
             "",
         )
+        # 流式后的json校验
         tool_call.arguments = _extract_tool_call_arguments(args_str)
         _emit_tool_end_if_needed(state, stream, call_id)
         return False
@@ -413,8 +424,8 @@ def _apply_openai_stream_event(
         return True
 
     if _event_type_matches(
-        event_type,
-        ("response.failed", "response.error", "response.cancelled", "error"),
+            event_type,
+            ("response.failed", "response.error", "response.cancelled", "error"),
     ):
         error_message = _error_message_from_event(event)
         if "cancel" in event_type:
@@ -447,13 +458,41 @@ def _apply_openai_stream_event(
 
 
 def _apply_output_item(
-    *,
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    item: Mapping[str, Any],
-    close_text: bool,
-    output_index: int,
+        *,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        item: Mapping[str, Any],
+        close_text: bool,
+        output_index: int,
 ) -> None:
+    """
+    根据 output item 的类型，在 state.partial 中创建或更新对应的内容块（文本/思考/工具调用），
+    并向下游推送相应的生命周期事件（如 text_start、thinking_start、toolcall_start）。
+
+    该函数同时处理 response.output_item.added 和 response.output_item.done 两个事件，
+    通过 close_text 参数区分：added 时不关闭块，done 时关闭。
+
+    Parameters
+    ----------
+    state : _OpenAIStreamingState
+        当前流式响应的累积状态，包含 partial 消息、各分桶索引等。
+    stream : AssistantMessageEventStream
+        用于向下游推送事件的事件流。
+    item : Mapping[str, Any]
+        事件中包含的 output item 快照，通常来自 event["item"] 或 event["output_item"]。
+        必须包含 "type" 字段，可选 "call_id"、"id"、"name"、"arguments"、"content" 等。
+    close_text : bool
+        是否在本次处理结束后关闭已创建的文本/思考块。
+        - True 对应 response.output_item.done 事件
+        - False 对应 response.output_item.added 事件
+    output_index : int
+        该 output item 在最终 response.output 数组中的索引（从 0 开始）。
+
+    Returns
+    -------
+    None
+        本函数不返回任何值，所有结果通过修改 state 和推送 stream 事件体现。
+    """
     item_type = _as_str(item.get("type"))
     if item_type == "function_call":
         call_id = _as_str(item.get("call_id")) or _as_str(item.get("id"))
@@ -552,7 +591,7 @@ def _trailing_text_delta(*, current: str, observed: str) -> str:
     if not current:
         return observed
     if observed.startswith(current):
-        return observed[len(current) :]
+        return observed[len(current):]
     if current.startswith(observed):
         return ""
 
@@ -564,10 +603,10 @@ def _trailing_text_delta(*, current: str, observed: str) -> str:
 
 
 def _ensure_text_block(
-    *,
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    event: Mapping[str, Any],
+        *,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        event: Mapping[str, Any],
 ) -> int:
     key = (_as_int(event.get("output_index")), _as_int(event.get("content_index")))
     existing = state.text_indices.get(key)
@@ -588,10 +627,10 @@ def _ensure_text_block(
 
 
 def _ensure_thinking_block(
-    *,
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    event: Mapping[str, Any],
+        *,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        event: Mapping[str, Any],
 ) -> int:
     output_index = _as_int(event.get("output_index"))
     item_id = _as_str(event.get("item_id")) or _as_str(event.get("id"))
@@ -617,10 +656,10 @@ def _ensure_thinking_block(
 
 
 def _emit_text_end_if_needed(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    content_index: int,
-) -> None:
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        content_index: int,
+) -> None:# 向事件流推送一个 text_end 事件，标记某个文本块（TextContent）已经完成输出。
     if content_index in state.closed_text_indices:
         return
 
@@ -640,9 +679,9 @@ def _emit_text_end_if_needed(
 
 
 def _emit_thinking_end_if_needed(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    content_index: int,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        content_index: int,
 ) -> None:
     if content_index in state.closed_thinking_indices:
         return
@@ -663,27 +702,27 @@ def _emit_thinking_end_if_needed(
 
 
 def _close_open_text_blocks(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
 ) -> None:
     for content_index in list(state.text_indices.values()):
         _emit_text_end_if_needed(state, stream, content_index)
 
 
 def _close_open_thinking_blocks(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
 ) -> None:
     for content_index in list(state.thinking_indices.values()):
         _emit_thinking_end_if_needed(state, stream, content_index)
 
 
 def _ensure_tool_call(
-    *,
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    call_id: str,
-    name: str | None,
+        *,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        call_id: str,
+        name: str | None,
 ) -> int:
     existing = state.tool_indices.get(call_id)
     if existing is not None:
@@ -708,9 +747,9 @@ def _ensure_tool_call(
 
 
 def _emit_tool_end_if_needed(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
-    call_id: str,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
+        call_id: str,
 ) -> None:
     if call_id in state.closed_tool_call_ids:
         return
@@ -735,8 +774,8 @@ def _emit_tool_end_if_needed(
 
 
 def _close_open_tool_calls(
-    state: _OpenAIStreamingState,
-    stream: AssistantMessageEventStream,
+        state: _OpenAIStreamingState,
+        stream: AssistantMessageEventStream,
 ) -> None:
     for call_id, content_index in state.tool_indices.items():
         if call_id in state.closed_tool_call_ids:
@@ -1000,8 +1039,8 @@ def _coerce_json_schema(schema: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _assistant_from_openai_response(
-    model: Model,
-    response: Mapping[str, Any],
+        model: Model,
+        response: Mapping[str, Any],
 ) -> AssistantMessage:
     content: list[AssistantContentBlock] = []
     for item in _as_mapping_list(response.get("output")):
@@ -1105,6 +1144,23 @@ def _extract_tool_call(item: Mapping[str, Any]) -> ToolCall | None:
 
 
 def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
+    """
+    将工具调用的参数统一转换为标准字典格式。
+
+    Parameters
+    ----------
+    raw : Any
+        工具调用的原始参数，支持以下格式：
+        - dict : 直接返回，key 强制转为 str
+        - str  : 先解析为 JSON，再转为 dict
+        - 其他 : 返回空字典 {}
+
+    Returns
+    -------
+    dict[str, Any]
+        标准化后的参数字典。
+        若无法解析，返回空字典 {}。
+    """
     if isinstance(raw, Mapping):
         return {str(key): value for key, value in raw.items()}
 
@@ -1112,7 +1168,7 @@ def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            return {}
+            return {}      # ← 问题所在：任何不合法都整体归零
 
         if isinstance(parsed, Mapping):
             return {str(key): value for key, value in parsed.items()}
@@ -1135,9 +1191,9 @@ def _extract_error_message(response: Mapping[str, Any]) -> str | None:
 
 
 def _derive_stop_reason(
-    content: Sequence[AssistantContentBlock],
-    response: Mapping[str, Any],
-    error_message: str | None,
+        content: Sequence[AssistantContentBlock],
+        response: Mapping[str, Any],
+        error_message: str | None,
 ) -> StopReason:
     if error_message:
         status = _as_str(response.get("status"))
@@ -1191,10 +1247,10 @@ def _done_reason_for_message(message: AssistantMessage) -> DoneReason:
 
 
 def _assistant_error_message(
-    *,
-    model: Model,
-    stop_reason: StopReason,
-    error_message: str,
+        *,
+        model: Model,
+        stop_reason: StopReason,
+        error_message: str,
 ) -> AssistantMessage:
     return AssistantMessage(
         content=[TextContent(text="")],
@@ -1248,6 +1304,39 @@ def _as_int(value: Any) -> int:
 
 
 def _event_to_mapping(event: Mapping[str, Any] | Any) -> dict[str, Any]:
+    """
+    将大模型输出的事件对象转换为标准字典。
+
+    优先处理以下情况：
+    1. 如果 event 本身就是 Mapping 类型，直接转为 dict。
+    2. 如果 event 有 to_dict() 方法，调用并尝试转为 dict。
+    3. 如果 event 有 model_dump() 方法，调用并尝试转为 dict。
+    4. 如果以上均不满足，则从预定义的字段列表中提取属性组成字典。
+
+    Parameters
+    ----------
+    event : Mapping[str, Any] | Any
+        输入事件。可以是字典，或实现了 to_dict() / model_dump() 方法的对象，
+        或是具有 type、delta、text 等属性的对象。
+    {'type': 'response.output_text.delta', 'delta': '巴黎', 'output_index': 0}
+
+    Returns
+    -------
+    dict[str, Any]
+        转换后的字典。若 event 为空或无法提取任何字段，返回空字典。
+
+    Examples
+    --------
+    >>> _event_to_mapping({"a": 1})
+    {'a': 1}
+
+    >>> class Obj:
+    ...     def __init__(self):
+    ...         self.type = "text"
+    ...         self.delta = "hello"
+    >>> _event_to_mapping(Obj())
+    {'type': 'text', 'delta': 'hello'}
+    """
     if isinstance(event, Mapping):
         return dict(event)
 
@@ -1341,10 +1430,11 @@ def _load_async_openai_class() -> Any:
 
 
 async def _stream_openai_events(
-    payload: dict[str, Any],
-    api_key: str,
-    base_url: str | None,
+        payload: dict[str, Any],
+        api_key: str,
+        base_url: str | None,
 ) -> AsyncIterator[Mapping[str, Any]]:
+    """调 OpenAI API，拿到原始 SSE 流"""
     async_openai = _load_async_openai_class()
     client_kwargs: dict[str, Any] = {"api_key": api_key}
     if base_url:
@@ -1367,9 +1457,9 @@ async def _stream_openai_events(
 
 
 async def _request_openai_response(
-    payload: dict[str, Any],
-    api_key: str,
-    base_url: str | None,
+        payload: dict[str, Any],
+        api_key: str,
+        base_url: str | None,
 ) -> dict[str, Any]:
     async_openai = _load_async_openai_class()
 
