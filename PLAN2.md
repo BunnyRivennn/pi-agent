@@ -9,11 +9,14 @@
 ## 0. 一句话结论
 
 - 校验（jsonschema）：**已完成**，不在本次范围。
-- 流式参数解析：**未对齐**。两处缺陷：
-  1. **Responses provider**：delta 时只拼字符串、不解析（TS 每片都解析）；done 时 `json.loads` 失败即整体归零 `{}`。
-  2. **Completions provider**：delta 时**已经每片调用** `_parse_streaming_json`（结构已对齐），但该函数是假的——只是 `json.loads` 包一层，零容错，坏 JSON 照样归零。
+- 流式参数解析：**未对齐，但只对齐"最终解析"，不对齐"每片解析"**。真正的缺陷：
+  1. **Responses provider**：done 时 `json.loads` 失败即整体归零 `{}`——坏 JSON（路径转义/截断）丢失。
+  2. **Completions provider**：同上，收口函数零容错。
+  3. completions 的 delta 分支每片调用 `_parse_streaming_json`（:389）——**这个"对齐"反而是要讨论的点，见 §6，不作为要补齐的能力。**
 
-修法：新增 1 个共享模块（容错解析器），改 2 个 provider 共 4 个收口点，加 1 个测试文件。**不动 agent_core、不改事件协议、不引第三方依赖。**
+修法：新增 1 个共享模块（容错解析器），改 2 个 provider 的最终收口点，加 1 个测试文件。**不动 agent_core、不改事件协议、不引第三方依赖、不做 delta 每片解析。**
+
+> **关于"TS 每片都解析，我们为什么不跟"**：每片解析是 O(n²) 的全量重扫（200 字符/50 片 ≈ 5000 次字符扫描，vs 最后一次 200 次），且 90% 结果立刻被覆盖、无人读取；补全出的半成品还可能误导（截断数字被猜成错误值）。TS 付这个代价是因为 grammar/custom tool 需要在流中途程序化消费结构化参数；本项目没有此类消费者，UI 看原始字符串即可。详见 §6。
 
 ---
 
@@ -66,13 +69,11 @@ Python 侧草稿存在 `state.tool_arg_buffers`（独立字典），不挂在消
 | # | 文件 | 动作 | 对齐 TS |
 |---|---|---|---|
 | 1 | `src/pi_agent/pi_ai/providers/_json_repair.py` | **新建** | `json-parse.ts` 全文 |
-| 2 | `.../providers/openai.py` → delta 分支（当前 :370-382） | 累积后加一行每片解析 | shared.ts delta 分支 |
-| 3 | `.../providers/openai.py` → `_extract_tool_call_arguments`（当前 ~:1150） | 委托共享解析器 | parseStreamingJson |
-| 4 | `.../providers/openai_completions.py` → `_parse_streaming_json`（:818） | 委托共享解析器（去掉假实现） | parseStreamingJson |
-| 5 | `.../providers/openai_completions.py` → `_extract_tool_call_arguments`（:803） | 委托共享解析器 | parseStreamingJson |
-| 6 | `tests/test_json_repair.py` | **新建** | 覆盖 §4 全部用例 |
+| 2 | `.../providers/openai.py` → `_extract_tool_call_arguments`（当前 ~:1150） | 委托共享解析器 | parseStreamingJson |
+| 3 | `.../providers/openai_completions.py` → `_extract_tool_call_arguments`（:803）与 `_parse_streaming_json`（:818） | 委托共享解析器（去掉假实现） | parseStreamingJson |
+| 4 | `tests/test_json_repair.py` | **新建** | 覆盖 §4 全部用例 |
 
-不改：`_apply_output_item` 中对 Mapping 型 arguments 的处理（已正确）、agent_loop、事件类型。
+不改：delta 分支（两 provider 均保持"只累积字符串"，见 §6）、`_apply_output_item` 中对 Mapping 型 arguments 的处理（已正确）、agent_loop、事件类型。
 
 ---
 
@@ -220,56 +221,7 @@ def parse_streaming_json(raw: Any) -> dict[str, Any]:
 
 > 瀑布顺序与 TS 完全一致：① 原始严格 → ② 修复后严格 → ③ 补全原始 → ④ 补全修复后。
 
-### 改动 2：`openai.py` delta 分支（当前 :370-382）加每片解析
-
-现状（只累积、不解析，partial 里 arguments 一直是 `{}` 直到 done）：
-
-```python
-        delta = _as_str(event.get("delta")) or ""
-        if delta:
-            state.tool_arg_buffers[call_id] = (
-                    state.tool_arg_buffers.get(call_id, "") + delta
-            )
-            stream.push(
-                {
-                    "type": "toolcall_delta",
-                    "content_index": content_index,
-                    "delta": delta,
-                    "partial": state.partial,
-                }
-            )
-        return False
-```
-
-改为（累积后立刻解析回写 ToolCall.arguments，对齐 shared.ts delta 分支）：
-
-```python
-        delta = _as_str(event.get("delta")) or ""
-        if delta:
-            buffer = state.tool_arg_buffers.get(call_id, "") + delta
-            state.tool_arg_buffers[call_id] = buffer
-            tool_call = cast(ToolCall, state.partial.content[content_index])
-            tool_call.arguments = parse_streaming_json(buffer)
-            stream.push(
-                {
-                    "type": "toolcall_delta",
-                    "content_index": content_index,
-                    "delta": delta,
-                    "partial": state.partial,
-                }
-            )
-        return False
-```
-
-文件顶部加导入：
-
-```python
-from ._json_repair import parse_streaming_json
-```
-
-> 说明：TS 的 done 增量去重（startsWith 切片）**不做**——Python 的 `function_call_arguments.done` 事件本身不重复推 delta，无重复显示问题。
-
-### 改动 3：`openai.py` 的 `_extract_tool_call_arguments`（当前 ~:1150）
+### 改动 2：`openai.py` 的 `_extract_tool_call_arguments`（当前 ~:1150）
 
 现状：
 
@@ -298,33 +250,21 @@ def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
 
 这样两个调用点（done 时的最终解析、流异常结束时的兜底）同时获得容错。
 
-### 改动 4：`openai_completions.py` 的 `_parse_streaming_json`（:818）
+### 改动 3：`openai_completions.py` 的两个函数（:803 / :818）
 
-现状（名字叫 streaming，实际零容错）：
-
-```python
-def _parse_streaming_json(raw: str) -> dict[str, Any]:
-    if not raw:
-        return {}
-    return _extract_tool_call_arguments(raw)
-```
-
-改为：删除此函数，文件顶部加 `from ._json_repair import parse_streaming_json`，把 :389 的调用改为共享函数：
-
-```python
-        existing_tool_call.arguments = parse_streaming_json(buffer)
-```
-
-### 改动 5：`openai_completions.py` 的 `_extract_tool_call_arguments`（:803）
-
-与改动 3 相同，整体委托：
+`_extract_tool_call_arguments` 整体委托（`_finish_current_block` :432 的调用点自动获益）：
 
 ```python
 def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
     return parse_streaming_json(raw)
 ```
 
-（`_finish_current_block` :432 的调用点自动获益。）
+`_parse_streaming_json`（:818，当前是零容错假实现）有两个选择：
+
+- **方案 A（推荐，最小改动）**：同样委托共享解析器，**但保留 :389 的每片调用不动**——函数变真后每片解析自动有了容错，零额外成本，行为只在"坏 JSON"时从 `{}` 变为尽力救回。
+- **方案 B（更彻底）**：删掉 :389 的每片调用与 `_parse_streaming_json`，delta 分支只保留 buffer 累积（与 responses provider 统一），解析只发生在 `_finish_current_block`。
+
+本图纸默认 A；若认同 §6"每片解析无消费者"的判断，B 更干净但需确认没有外部代码读 partial.arguments。两者最终结果等价（终态都从完整串解析）。
 
 ---
 
@@ -361,6 +301,12 @@ uv run python examples/debug_provider_events.py    # 伪造事件回归
 
 ## 6. 明确不做
 
+- **不做 delta 每片解析（responses provider 不加；completions 见改动 3 方案 B 选项）**。TS `slot.block.arguments = parseStreamingJson(partialJson)` 每片执行，我们不跟，理由：
+  1. **无消费者**：项目没有流式结构化 UI、没有 grammar tool、没有流中途程序化读取 arguments 的逻辑；给人看直接渲染原始 buffer 字符串即可。
+  2. **O(n²) 浪费**：解析是全量重扫非增量，n 字符 k 片累计 O(n·k) 扫描，90%+ 结果下一片即覆盖。
+  3. **半成品会撒谎**：补全器对截断值的猜测无正确性保证（`20` vs `202`），被中途读取反成 bug 源。
+  4. **最终结果不受影响**：终态消息从 done/`output_item.done` 的完整串解析，delta 解析只影响过程中的 partial 快照。
+  - 未来若出现"流未结束就需结构化参数"的真实需求（流式表单 UI、参数预取/预校验、grammar 类协议），再按 TS 形状启用，插入点就在 delta 分支累积 buffer 之后。
 - **不引第三方库**：object 参数场景下自研 ~50 行已覆盖；若未来要支持深层嵌套/数组流式半成品，再评估 `json-repair`（对标 npm partial-json）。
 - **不做"为截断而抢救"的产品化承诺**：截断救回的值本身可能残缺（`"Shang"`），是否重试由上层 agent 决定；解析器只负责"不丢已有信息"。
 - **不移植 grammar/custom tool**（`custom_tool_call_input.*`、`constrained-sampling.ts`、每片结构化 input）：OpenAI grammar 专属协议。
