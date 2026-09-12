@@ -29,6 +29,7 @@ from ...agent_core.types import (
     UserMessage,
 )
 from ..types import PiAIRequest
+from ._json_repair import parse_streaming_json
 
 """
 入口：OpenAI 的原始 SSE 事件
@@ -1152,7 +1153,7 @@ def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
     raw : Any
         工具调用的原始参数，支持以下格式：
         - dict : 直接返回，key 强制转为 str
-        - str  : 先解析为 JSON，再转为 dict
+        - str  : 容错解析为 JSON（修复非法转义/截断），再转为 dict
         - 其他 : 返回空字典 {}
 
     Returns
@@ -1161,18 +1162,7 @@ def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
         标准化后的参数字典。
         若无法解析，返回空字典 {}。
     """
-    if isinstance(raw, Mapping):
-        return {str(key): value for key, value in raw.items()}
-
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}      # ← 问题所在：任何不合法都整体归零
-
-        if isinstance(parsed, Mapping):
-            return {str(key): value for key, value in parsed.items()}
-    return {}
+    return parse_streaming_json(raw)
 
 
 def _extract_error_message(response: Mapping[str, Any]) -> str | None:

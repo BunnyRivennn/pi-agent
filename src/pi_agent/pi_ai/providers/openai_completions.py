@@ -28,6 +28,7 @@ from ...agent_core.types import (
     UserMessage,
 )
 from ..types import PiAIRequest
+from ._json_repair import parse_streaming_json
 from .openai import _load_async_openai_class
 
 DoneReason = Literal["stop", "length", "toolUse"]
@@ -801,18 +802,7 @@ def _extract_usage(usage_data: Any) -> Usage:
 
 
 def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, Mapping):
-        return {str(key): value for key, value in raw.items()}
-
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-
-        if isinstance(parsed, Mapping):
-            return {str(key): value for key, value in parsed.items()}
-    return {}
+    return parse_streaming_json(raw)
 
 
 def _parse_streaming_json(raw: str) -> dict[str, Any]:

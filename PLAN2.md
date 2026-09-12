@@ -1,4 +1,11 @@
-# PLAN2：流式工具参数 JSON 解析对齐（施工图纸）
+# PLAN2：流式工具参数 JSON 解析对齐（✅ 已落地 2026-09-12）
+
+> **状态**：§3 改动 1/2/3/4 已完成（全套 75 tests passed，其中 test_json_repair.py 35 个）。
+> 落地策略严格限定为 **repair（字符级修复）+ complete（结构补全）两级，明确不做砍尾**：
+> `{"a": 1, "cit` 这类残骸必须返回 `{}`，绝不砍成 `{"a": 1}`。
+> 原因：砍尾会静默丢弃模型未吐完的字段，下游可能拿着残缺参数真的执行；
+> 返回 `{}` 会被 jsonschema required 显式拦下，由 agent loop 把错误喂回模型重试——
+> **显式失败比静默丢字段安全**。此原则由 `test_parser_never_silently_drops_fields` 钉死防回归。
 
 > 目标：让 Python 版的流式工具参数解析与官方 TS 版 Pi 的 `utils/json-parse.ts` + `providers/openai-responses-shared.ts` 行为对齐。
 > 本文是**施工图纸**：每个改动点写明「文件 / 函数 / 当前行号 / 现状代码 / 改成什么 / 对齐 TS 哪里」。
@@ -71,7 +78,7 @@ Python 侧草稿存在 `state.tool_arg_buffers`（独立字典），不挂在消
 | 1 | `src/pi_agent/pi_ai/providers/_json_repair.py` | **新建** | `json-parse.ts` 全文 |
 | 2 | `.../providers/openai.py` → `_extract_tool_call_arguments`（当前 ~:1150） | 委托共享解析器 | parseStreamingJson |
 | 3 | `.../providers/openai_completions.py` → `_extract_tool_call_arguments`（:803）与 `_parse_streaming_json`（:818） | 委托共享解析器（去掉假实现） | parseStreamingJson |
-| 4 | `tests/test_json_repair.py` | **新建** | 覆盖 §4 全部用例 |
+| 4 | `tests/pi_ai/test_json_repair.py` | **新建** | 覆盖 §4 全部用例 |
 
 不改：delta 分支（两 provider 均保持"只累积字符串"，见 §6）、`_apply_output_item` 中对 Mapping 型 arguments 的处理（已正确）、agent_loop、事件类型。
 
@@ -268,7 +275,7 @@ def _extract_tool_call_arguments(raw: Any) -> dict[str, Any]:
 
 ---
 
-## 4. 测试：新建 `tests/test_json_repair.py`
+## 4. 测试：新建 `tests/pi_ai/test_json_repair.py`
 
 参数化覆盖下列输入 → 期望（全部通过即对齐）：
 
@@ -308,7 +315,10 @@ uv run python examples/debug_provider_events.py    # 伪造事件回归
   4. **最终结果不受影响**：终态消息从 done/`output_item.done` 的完整串解析，delta 解析只影响过程中的 partial 快照。
   - 未来若出现"流未结束就需结构化参数"的真实需求（流式表单 UI、参数预取/预校验、grammar 类协议），再按 TS 形状启用，插入点就在 delta 分支累积 buffer 之后。
 - **不引第三方库**：object 参数场景下自研 ~50 行已覆盖；若未来要支持深层嵌套/数组流式半成品，再评估 `json-repair`（对标 npm partial-json）。
-- **不做"为截断而抢救"的产品化承诺**：截断救回的值本身可能残缺（`"Shang"`），是否重试由上层 agent 决定；解析器只负责"不丢已有信息"。
+- **绝不做砍尾抢救（红线）**：补全只允许"加"（补引号、补括号、去悬空尾逗号），不允许"删"模型已生成的内容。
+  `{"a": 1, "cit` 看似能在最后一个逗号处砍成 `{"a": 1}`，但那是静默丢字段——下游会把残缺参数当成功结果执行。
+  正确做法是返回 `{}`，让 jsonschema required 校验显式失败、agent loop 重试。
+- **不做"为截断而抢救"的产品化承诺**：截断补全救回的值本身可能残缺（`"Shang"`），是否重试由上层 agent 决定；解析器只负责"不丢已有信息"，救不回完整 object 就给 `{}`。
 - **不移植 grammar/custom tool**（`custom_tool_call_input.*`、`constrained-sampling.ts`、每片结构化 input）：OpenAI grammar 专属协议。
 - **不改 output_index 槽位方案**：DeepSeek 双 ID 已用 `tool_item_id_to_call_id` 映射修好；output_index 重构属 Phase 4 兼容性议题，另案。
 - **不补 done 增量去重**：Python 协议事件无重复，TS 那段是针对其 SDK 事件形状的防御。
