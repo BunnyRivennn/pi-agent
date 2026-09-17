@@ -81,17 +81,20 @@
 
 ### 4.2 存什么：消息记录
 
-一条消息 = 一行记录，按 turn 批量、按 session 线性追加：
+一条 entry = 一行记录，按 turn 批量、按 session 线性追加：
 
 | 列 | 内容 |
 |---|---|
-| `id` | 存储层分配，`msg_<ms>-<rand6>`，时间序肉眼可读 |
+| `id` | 存储层分配，`msg_<ms>-<rand6>`，时间序肉眼可读（未来非消息 entry 用同 id 规则） |
 | `session_id` | Agent 已有的 session_id（没有则首次写入时生成 `sess_<uuid8>`） |
-| `parent_id` | 上一条消息 id；首条为 NULL（**字段先在，分叉后用**） |
+| `parent_id` | 上一条 entry id；首条为 NULL（**字段先在，分叉后用**） |
 | `seq` | 会话内自增序号，回放顺序的权威依据（不依赖毫秒时间戳碰撞） |
+| `kind` | entry 类型，第一版只有 `"message"`；列先就位，未来加 `model_change` / `thinking_level_change` / `compaction` 等（对齐官方 9 种 SessionEntry，见 §9.2） |
 | `timestamp` | 消息自带 epoch ms |
-| `role` | `user` / `assistant` / `toolResult`（冗余列，方便查询/调试） |
-| `payload` | 消息 dataclass 按 type 标签序列化的**完整 JSON 文本** |
+| `role` | `user` / `assistant` / `toolResult`（kind=message 时冗余，方便查询/调试；其他 kind 为 NULL） |
+| `payload` | 消息 dataclass 按 type 标签序列化的**完整 JSON 文本**；其他 kind 各自的 JSON |
+
+> 设计依据：官方 TS 的会话文件不是"消息表"而是**会话事件流**（9 种 entry type）。第一版我们只实现 message，但表按 entry 设计、加 `kind` 列，后续加类型不用迁移表结构。
 
 一个事务写一个 turn：`[assistant, tool_result...]` 要么全进要么全不进，不会存出"有调用无结果"的半截 turn。
 
@@ -115,13 +118,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id          TEXT PRIMARY KEY,          -- msg_xxx
+    id          TEXT PRIMARY KEY,          -- msg_xxx（entry id）
     session_id  TEXT NOT NULL REFERENCES sessions(id),
     parent_id   TEXT,
     seq         INTEGER NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'message',  -- 第一版只有 message；为 model_change 等留位
     timestamp   INTEGER NOT NULL,
-    role        TEXT NOT NULL,
-    payload     TEXT NOT NULL,             -- 完整消息 JSON
+    role        TEXT,                      -- kind=message 时为 user/assistant/toolResult
+    payload     TEXT NOT NULL,             -- 完整 entry JSON（消息即带 type 标签的消息体）
     UNIQUE (session_id, seq)
 );
 
@@ -235,12 +239,27 @@ examples/
 
 ## 8. 开放问题（施工时逐个定）
 
-1. **模型配置恢复**：第一版 checkpointer 只存消息；调用方用相同 system_prompt/model/tools 重新构造 Agent，再经 `restore_messages` 回填。demo 里演示完整写法；将来 AgentSession + settings/registry（Phase 3③）再收编配置。
+1. **模型配置恢复**：第一版 checkpointer 只存消息；调用方用相同 system_prompt/model/tools 重新构造 Agent，再经 `restore_messages` 回填。demo 里演示完整写法。
+   **官方对照（TS v0.85.1）**：`SessionManager` 把配置变更也持久化为 entry——`appendModelChange(provider, modelId)`、`appendThinkingLevelChange(level)`，回放时 `buildSessionContext()` 沿 root→leaf 返回 `{messages, thinkingLevel, model}`。
+   我们的跟进路径：第二版在 entry kind 中加入 `model_change` / `thinking_level_change`（§9.2），恢复时由会话层而非调用方还原配置；tools 是代码对象仍不可持久化，恢复时按名校验重注。
 2. **session_id 自动生成位置**：Agent 挂载 checkpointer 且没传 session_id 时，首次 `save_messages` 由后端生成并回传，Agent 更新自身 session_id property。需注意并发 prompt（现有代码本就禁止流式中 prompt，问题不大）。
 3. **DB 文件路径配置**：构造 `SqliteCheckpointer(path=...)` 必传路径，默认值放在哪（环境变量 `PI_AGENT_DB`？还是只给 demo 用 `.pi_agent/sessions.db`）——倾向必传，不搞全局默认。
 4. **ImageContent.data 可能很大**：第一版照存（SQLite TEXT 无实际压力），未来再评估外置 blob 存储。
 
 ## 9. 后续演进（本版跑起来后再一点点加）
+
+### 9.0 官方 TS（v0.85.1）持久化对照
+
+依据本仓 skill `dg-piagent` 的 F01 / sdk_doc-12 对官方实现的解读：
+
+| 维度 | 官方 TS | 本计划第一版 | 说明 |
+|---|---|---|---|
+| 默认载体 | JSONL 文件 `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl`，首行 header | SQLite | 官方另提供 DB 正门：`inMemory()` + `getEntries()` 自落库 + `parseSessionEntries()`/`entries` 恢复——我们的 SQLite 即此模式 |
+| 记录模型 | append-only **entry 流**（message / model_change / thinking_level_change / compaction / branch_summary / custom / custom_message / label / session_info 共 9 种，id/parentId + leaf 指针） | 只写 `kind=message`，但表按 entry 设计（kind/parent_id 就位） | 类型后续按需加，不迁表 |
+| 崩溃续跑 | **无**。open/continueRecent 只读回历史，工具不会重新触发；turn 中途崩溃丢失当前 turn | 无（同样 turn 边界） | 我们的续跑（9.1）是超出官方的增量 |
+| 首写时机 | 第一条 **assistant** 消息到达才真正写文件（hasAssistant 守卫，空会话不留文件） | **user 入口即写** | 有意差异：我们优先保证用户输入不丢；将来可加"空会话清理" |
+| 配置恢复 | model_change / thinking_level_change entry，`buildSessionContext()` 回放返回当前 model/level | 调用方重建 Agent | 第二版跟进（见 §8.1） |
+| 分叉 | leaf 指针 + `branch(id)` / `branchWithSummary()` / `resetLeaf()`，旧分支保留 | parent_id 字段就位，无 API | 见 9.2 |
 
 ### 9.1 下一步：断点续跑（思路已验证，不需要 LangGraph 式快照）
 
@@ -265,7 +284,8 @@ missing = 末条 AssistantMessage 的 toolcall 集合
 
 ### 9.2 再往后
 
-- **分叉树**：schema 的 `parent_id` 已就位；加 tip 概念 + `load_messages(tip=...)` + 写入时显式 parent，即可从历史消息 fork。
+- **entry 类型扩展（对齐官方 9 种 SessionEntry）**：`kind` 列已就位，按真实需求逐个加——优先 `model_change` / `thinking_level_change`（解决 §8.1 配置恢复），然后 `compaction`（压缩归档，Phase 4 需要）、`session_info`（显示名）、`custom`/`custom_message`（扩展状态，后者进 LLM 上下文）。每加一种只需扩 `serialize.py` 的 kind 分支。
+- **分叉树**：schema 的 `parent_id` 已就位；加官方的 leaf 指针概念（sessions 表加 `tip_entry_id`）+ `load_messages(tip=...)` + 写入时显式 parent，即可从历史消息 fork，旧分支保留。
 - **PG 后端**：`PostgresCheckpointer` 实现同一 Protocol（asyncpg），SQL 几乎直译；序列化层和接口零改动——这就是选 SQLite 不选 JSONL 的核心原因。
 - **AgentSession / `create_agent_session`**（PLAN Phase 3①）：门面负责模型配置存取、一行 resume。
 - **HITL 审批**：在 missing 工具上加"等待审批"标记 + resume value，是 9.1 的自然延伸。

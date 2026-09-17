@@ -21,10 +21,12 @@ from .types import (
     AssistantMessage,
     GetMessagesFn,
     LlmContext,
+    StopReason,
     StreamFn,
     TextContent,
     ToolCall,
     ToolResultMessage,
+    Usage,
     assistant_tool_calls,
     message_role,
 )
@@ -50,11 +52,18 @@ def agent_loop(
         stream.push({"type": "agent_start"})
         stream.push({"type": "turn_start"})
 
-        for prompt in prompts:
-            stream.push({"type": "message_start", "message": prompt})
-            stream.push({"type": "message_end", "message": prompt})
+        try:
+            for prompt in prompts:
+                stream.push({"type": "message_start", "message": prompt})
+                stream.push({"type": "message_end", "message": prompt})
 
-        await _run_loop(current_context, new_messages, config, abort_event, stream, stream_fn)
+            await _run_loop(
+                current_context, new_messages, config, abort_event, stream, stream_fn
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 生产者兜底：任何意外异常都必须让流正常终止，
+            # 否则后台 task 静默死亡，消费者 async for 永久挂起、prompt() 不返回
+            _fail_with_error(stream, new_messages, exc, config, abort_event)
 
     asyncio.create_task(_run())
     return stream
@@ -85,10 +94,49 @@ def agent_loop_continue(
         stream.push({"type": "agent_start"})
         stream.push({"type": "turn_start"})
 
-        await _run_loop(current_context, new_messages, config, abort_event, stream, stream_fn)
+        try:
+            await _run_loop(
+                current_context, new_messages, config, abort_event, stream, stream_fn
+            )
+        except Exception as exc:  # noqa: BLE001
+            _fail_with_error(stream, new_messages, exc, config, abort_event)
 
     asyncio.create_task(_run())
     return stream
+
+
+def _fail_with_error(
+    stream: EventStream[AgentEvent, list[AgentMessage]],
+    new_messages: list[AgentMessage],
+    exc: Exception,
+    config: AgentLoopConfig,
+    abort_event: asyncio.Event | None,
+) -> None:
+    """生产者致命异常兜底：把异常包装成 error AssistantMessage，按正常契约收尾。
+
+    与 stream_fn 返回 "error" 事件的优雅路径（_run_loop 内）产出形状一致：
+    message_start/end + turn_end + agent_end，保证消费者能退出、错误能进历史。
+    """
+    stop_reason: StopReason = (
+        "aborted" if abort_event is not None and abort_event.is_set() else "error"
+    )
+    error_message = AssistantMessage(
+        content=[TextContent(text="")],
+        api=config.model.api,
+        provider=config.model.provider,
+        model=config.model.id,
+        usage=Usage(),
+        stop_reason=stop_reason,
+        error_message=str(exc),
+    )
+    new_messages.append(error_message)
+    stream.push({"type": "message_start", "message": error_message})
+    stream.push({"type": "message_end", "message": error_message})
+    stream.push(
+        {"type": "turn_end", "message": error_message, "tool_results": []}
+    )
+    stream.push({"type": "agent_end", "messages": new_messages})
+    stream.end(new_messages)
 
 
 def _create_agent_stream() -> EventStream[AgentEvent, list[AgentMessage]]:

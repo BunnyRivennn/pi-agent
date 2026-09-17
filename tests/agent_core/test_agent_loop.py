@@ -36,9 +36,9 @@ def make_model() -> Model:
 
 
 def make_assistant(
-    content: list[AssistantContentBlock],
-    *,
-    stop_reason: StopReason = "stop",
+        content: list[AssistantContentBlock],
+        *,
+        stop_reason: StopReason = "stop",
 ) -> AssistantMessage:
     return AssistantMessage(
         content=content,
@@ -109,10 +109,10 @@ async def test_agent_loop_executes_tool_calls() -> None:
     executed: list[str] = []
 
     async def run_echo(
-        tool_call_id: str,
-        params: Mapping[str, Any],
-        abort_event: asyncio.Event | None = None,
-        on_update: Callable[[AgentToolResult[Any]], None] | None = None,
+            tool_call_id: str,
+            params: Mapping[str, Any],
+            abort_event: asyncio.Event | None = None,
+            on_update: Callable[[AgentToolResult[Any]], None] | None = None,
     ) -> AgentToolResult[Any]:
         del tool_call_id, abort_event, on_update
         value = str(params["value"])
@@ -141,10 +141,10 @@ async def test_agent_loop_executes_tool_calls() -> None:
     call_count = 0
 
     def stream_fn(
-        _model: Model,
-        _context: LlmContext,
-        _config: AgentLoopConfig,
-        _abort_event: asyncio.Event | None,
+            _model: Model,
+            _context: LlmContext,
+            _config: AgentLoopConfig,
+            _abort_event: asyncio.Event | None,
     ) -> AssistantMessageEventStream:
         nonlocal call_count
         if call_count == 0:
@@ -175,10 +175,10 @@ async def test_agent_loop_skips_remaining_tools_when_steering_arrives() -> None:
     executed: list[str] = []
 
     async def run_tool(
-        tool_call_id: str,
-        params: Mapping[str, Any],
-        abort_event: asyncio.Event | None = None,
-        on_update: Callable[[AgentToolResult[Any]], None] | None = None,
+            tool_call_id: str,
+            params: Mapping[str, Any],
+            abort_event: asyncio.Event | None = None,
+            on_update: Callable[[AgentToolResult[Any]], None] | None = None,
     ) -> AgentToolResult[Any]:
         del tool_call_id, abort_event, on_update
         value = str(params["value"])
@@ -212,10 +212,10 @@ async def test_agent_loop_skips_remaining_tools_when_steering_arrives() -> None:
     call_count = 0
 
     def stream_fn(
-        _model: Model,
-        _context: LlmContext,
-        _config: AgentLoopConfig,
-        _abort_event: asyncio.Event | None,
+            _model: Model,
+            _context: LlmContext,
+            _config: AgentLoopConfig,
+            _abort_event: asyncio.Event | None,
     ) -> AssistantMessageEventStream:
         nonlocal call_count
         if call_count == 0:
@@ -257,14 +257,62 @@ async def test_agent_loop_skips_remaining_tools_when_steering_arrives() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_terminates_when_stream_fn_raises() -> None:
+    """stream_fn 在产出任何事件前直接 raise（模拟 registry 解析失败/api_key 抛错等）。
+
+    生产者 task 必须兜底：产出 error assistant 消息 + agent_end，
+    否则消费者永远 await queue.get()，prompt() 永久挂起。
+    """
+
+    def exploding_stream_fn(
+            _model: Model,
+            _context: LlmContext,
+            _config: AgentLoopConfig,
+            _abort_event: asyncio.Event | None,
+    ) -> AssistantMessageEventStream:
+        raise RuntimeError("boom")
+
+    prompt = UserMessage(content="hi")
+    context = AgentContext(system_prompt="", messages=[], tools=[])
+    config = AgentLoopConfig(
+        model=make_model(),
+        convert_to_llm=default_convert_to_llm,
+    )
+
+    stream = agent_loop([prompt], context, config, stream_fn=exploding_stream_fn)
+
+    async def collect_events() -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        async for event in stream:
+            events.append(event)
+        return events
+
+    # 挂死探测器：修复前生产者不发终态事件，这里会超时失败
+    events = await asyncio.wait_for(collect_events(), timeout=2)
+
+    print(f"\n  stream_fn 直接 raise，事件序列: {[e['type'] for e in events]}")
+
+    assert events[-1]["type"] == "agent_end"
+    # 错误也以正常消息形态走 message_start/end（Agent 靠 message_end 累积历史）
+    assert "message_end" in [e["type"] for e in events]
+
+    result_messages = await stream.result()
+    error_message = result_messages[-1]
+    assert isinstance(error_message, AssistantMessage)
+    assert error_message.stop_reason == "error"
+    assert error_message.error_message is not None
+    assert "boom" in error_message.error_message
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_returns_validation_error_for_invalid_tool_arguments() -> None:
     executed = False
 
     async def run_tool(
-        tool_call_id: str,
-        params: Mapping[str, Any],
-        abort_event: asyncio.Event | None = None,
-        on_update: Callable[[AgentToolResult[Any]], None] | None = None,
+            tool_call_id: str,
+            params: Mapping[str, Any],
+            abort_event: asyncio.Event | None = None,
+            on_update: Callable[[AgentToolResult[Any]], None] | None = None,
     ) -> AgentToolResult[Any]:
         nonlocal executed
         del tool_call_id, params, abort_event, on_update
@@ -293,10 +341,10 @@ async def test_agent_loop_returns_validation_error_for_invalid_tool_arguments() 
     call_count = 0
 
     def stream_fn(
-        _model: Model,
-        _context: LlmContext,
-        _config: AgentLoopConfig,
-        _abort_event: asyncio.Event | None,
+            _model: Model,
+            _context: LlmContext,
+            _config: AgentLoopConfig,
+            _abort_event: asyncio.Event | None,
     ) -> AssistantMessageEventStream:
         nonlocal call_count
         if call_count == 0:
