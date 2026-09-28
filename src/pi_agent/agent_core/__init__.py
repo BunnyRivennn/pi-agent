@@ -1,5 +1,19 @@
 from .agent import Agent, default_convert_to_llm
 from .agent_loop import agent_loop, agent_loop_continue
+from .compaction import (
+    DEFAULT_COMPACTION_SETTINGS,
+    SUMMARIZATION_PROMPT,
+    SUMMARIZATION_SYSTEM_PROMPT,
+    TOOL_RESULT_MAX_CHARS,
+    CompactionSettings,
+    ContextUsageEstimate,
+    calculate_context_tokens,
+    content_text,
+    estimate_context_tokens,
+    estimate_tokens,
+    serialize_conversation,
+    should_compact,
+)
 from .event_stream import AssistantMessageEventStream, EventStream
 from .types import (
     AgentContext,
@@ -55,4 +69,17 @@ __all__ = [
     "agent_loop_continue",
     "default_convert_to_llm",
     "default_model",
+    # compaction (D1)
+    "CompactionSettings",
+    "DEFAULT_COMPACTION_SETTINGS",
+    "ContextUsageEstimate",
+    "TOOL_RESULT_MAX_CHARS",
+    "SUMMARIZATION_PROMPT",
+    "SUMMARIZATION_SYSTEM_PROMPT",
+    "calculate_context_tokens",
+    "content_text",
+    "estimate_context_tokens",
+    "estimate_tokens",
+    "serialize_conversation",
+    "should_compact",
 ]

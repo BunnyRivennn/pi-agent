@@ -526,6 +526,17 @@ def _validate_tool_arguments(
             f"Expected JSON object, got {type(arguments).__name__}."
         )
 
+    # 先过工具自带的归一化钩子，再做 schema 校验：
+    # 模型常发出“数组字段变 JSON 字符串”这类形式偏差，能救就不要白白报错。
+    if tool.prepare_arguments is not None:
+        prepared = tool.prepare_arguments(arguments)
+        if not isinstance(prepared, Mapping):
+            raise RuntimeError(
+                f'Tool "{tool.name}" prepare_arguments returned a non-object. '
+                f"Expected mapping, got {type(prepared).__name__}."
+            )
+        arguments = prepared
+
     schema = tool.parameters
     if schema is None:
         return {str(key): value for key, value in arguments.items()}

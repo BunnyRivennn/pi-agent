@@ -210,12 +210,12 @@ async def test_listener_exception_does_not_kill_agent() -> None:
 
     received: list[str] = []  # 好 listener 用它留痕：记录自己收到的事件类型
 
-    def bad_listener(event: dict) -> None:
+    def bad_listener(event: dict) -> None:  # type: ignore[type-arg]  # 既有填空占位
         # ⬜ 填空 1：这个 listener 是个"有 bug 的订阅者"，让它直接抛异常
         # 提示：一行 raise，异常文本写 "listener boom"
         raise NotImplementedError("填空 1：在这里 raise RuntimeError")
 
-    def good_listener(event: dict) -> None:
+    def good_listener(event: dict) -> None:  # type: ignore[type-arg]  # 既有填空占位
         received.append(str(event["type"]))
 
     # ⬜ 填空 2：把两个 listener 都注册到 agent 上（调用 agent.subscribe(...)）

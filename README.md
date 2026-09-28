@@ -61,7 +61,65 @@ src/pi_agent/pi_ai/
   providers/mock.py
   providers/openai.py
   providers/openai_completions.py
+
+src/pi_agent/session/       # session persistence (checkpointer)
+  types.py         # 4 entry types (message/compaction/branch_summary/custom)
+  ids.py           # session UUIDv7 + entry ids
+  values.py        # typed KV/list side-store addresses
+  serialize.py     # entry <-> dict codecs
+  errors.py        # SessionError / SessionCorruptError
+  context.py       # compaction-aware context building
+  session.py       # StorageBackedSession + MutationLine + branches
+  repo.py          # SessionRepo (create/open/list/delete)
+  factory.py       # AgentSession facade + create_agent_session
+
+  storage/         # storage layer: contract + commit pipeline + backends
+    storage_types.py # Storage protocol + Write union + scan queries
+    commit.py        # seq allocation + write validation (backend-agnostic)
+    memory.py        # InMemoryStorage
+    sqlite.py        # SqliteStorage (WAL, transactional commit, seq counter)
 ```
+
+Adding a backend means implementing `storage.Storage` and reusing
+`commit.prepare_storage_commit` / `validate_committed_writes`; nothing outside
+`session/storage/` needs to change.
+
+## Session persistence example (no API key)
+
+Run:
+
+```bash
+uv run python examples/session_demo.py
+```
+
+Demonstrates quit → restart → resume: a conversation (including a tool round) is
+persisted to SQLite, the session is closed, then reopened by id into a brand-new
+`Agent` with history and config restored. Replaying history does **not** re-run
+tools — tool results are read back from storage.
+
+Wiring it into your own code:
+
+```python
+from pi_agent.session import Context, SqliteSessionRepo, create_agent_session
+
+ctx = Context()
+repo = SqliteSessionRepo("~/.pi-agent/sessions")   # one .db file per session
+
+# new session
+sess = await create_agent_session(agent, repo, ctx)
+session_id = sess.session.metadata.id
+
+await agent.prompt("hello")
+await agent.wait_for_idle()
+await sess.flush()        # wait for in-flight persistence
+await sess.dispose()
+
+# later / another process: reopen by id, history is restored automatically
+sess = await create_agent_session(agent2, repo, ctx, session_id=session_id)
+```
+
+Use `InMemorySessionRepo` for tests. Persistence is opt-in: an `Agent` without a
+session behaves exactly as before.
 
 ## End-to-end example
 

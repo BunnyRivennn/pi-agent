@@ -134,7 +134,8 @@ class Agent:
 
     def subscribe(self, listener: Listener) -> Callable[[], None]:
         """
-        订阅-取消订阅模式在这个 Agent 框架里，主要是为了对外暴露 Agent 的运行过程，让外部代码能实时感知 Agent 内部发生了什么。
+        订阅-取消订阅模式在这个 Agent 框架里，主要是为了对外暴露 Agent 的运行过程，
+        让外部代码能实时感知 Agent 内部发生了什么。
         有了订阅，外部就能实时监听每一个事件。
         """
         self._listeners.add(listener)

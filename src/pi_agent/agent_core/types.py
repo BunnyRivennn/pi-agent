@@ -147,6 +147,11 @@ class AgentToolResult(Generic[TDetails]):
 
 AgentToolUpdateCallback: TypeAlias = Callable[[AgentToolResult[Any]], None]
 
+#: 在 JSON Schema 校验之前，把模型发来的原始参数归一化。
+#: 现实中模型常把数组字段发成 JSON 字符串、把单个对象发成非数组，
+#: 或沿用旧版的平铺参数名；这一层负责“猜模型想干嘛”，猜不动就原样返回。
+PrepareArgumentsFn: TypeAlias = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
 
 class ToolExecuteFn(Protocol):
     async def __call__(
@@ -165,6 +170,12 @@ class AgentTool:
     description: str
     execute: ToolExecuteFn
     parameters: Mapping[str, Any] | None = None
+    #: 参数归一化钩子，在 schema 校验前运行（见 PrepareArgumentsFn）。
+    prepare_arguments: PrepareArgumentsFn | None = None
+    #: 一句话能力描述，用于拼装系统提示词里的工具清单。
+    prompt_snippet: str | None = None
+    #: 使用守则，用于拼装系统提示词里的 Guidelines 段。
+    prompt_guidelines: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

@@ -313,3 +313,8 @@ docker-compose.override.yaml
 .gemini/
 gha-creds-*.json
 .secrets/
+
+# pi-agent runtime session storage (CLI db files)
+session/storage/*.db
+session/storage/*.db-wal
+session/storage/*.db-shm
