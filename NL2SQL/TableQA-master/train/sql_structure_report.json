@@ -1,0 +1,38 @@
+{
+  "total_samples": 41522,
+  "difficulty_counts": {
+    "medium": 10317,
+    "easy": 31205
+  },
+  "feature_counts": {
+    "has_where": 41522,
+    "has_or": 8758,
+    "has_aggregate": 5022,
+    "condition_count_total": 67645,
+    "select_column_count_total": 46135,
+    "table_reference_count_total": 41522,
+    "sql_length_total": 3875887,
+    "has_and": 16332
+  },
+  "feature_by_difficulty": {
+    "medium": {
+      "has_where": 10317,
+      "has_or": 2013,
+      "has_aggregate": 5022,
+      "has_and": 2802
+    },
+    "easy": {
+      "has_where": 31205,
+      "has_or": 6745,
+      "has_and": 13530
+    }
+  },
+  "sample_counts": {
+    "medium": 10317,
+    "easy": 31205
+  },
+  "config": {
+    "samples_per_difficulty": 30,
+    "random_seed": 42
+  }
+}
