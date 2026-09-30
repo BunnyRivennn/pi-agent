@@ -12,7 +12,7 @@ ultracode: 对这个 Python Agent 项目做全面的 bug 扫描和代码优化�
 
 项目根路径：D:\yxr_files\pi-agent\
 
-项目背景（先读 README.md / PLAN.md / PLAN2.md / PLAN3.md 建立上下文）：
+项目背景（先读 README.md / PLAN.md / PLAN2.md / PLAN3.md /PLAN4.md 建立上下文）：
 这是官方 TypeScript SDK `@earendil-works/pi-coding-agent` v0.85.1 的 Python 移植学习项目
 （Python >= 3.11，src 布局，uv 管理，pytest + ruff + mypy strict）。
 两层架构：
