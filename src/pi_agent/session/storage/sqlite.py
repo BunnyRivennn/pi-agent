@@ -327,7 +327,8 @@ class SqliteStorage:
                 entry.timestamp,
                 entry.type,
                 entry.custom_type,
-                json.dumps(entry_to_dict(entry)),
+                # json.dumps(entry_to_dict(entry)),
+                json.dumps(entry_to_dict(entry), ensure_ascii=False)
             ),
         )
 
