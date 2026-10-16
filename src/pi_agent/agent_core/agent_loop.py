@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
@@ -27,9 +28,50 @@ from .types import (
     ToolCall,
     ToolResultMessage,
     Usage,
+    UserMessage,
     assistant_tool_calls,
     message_role,
 )
+
+
+async def _inject_before_run(
+        prompts: list[AgentMessage],
+        current_context: AgentContext,
+        new_messages: list[AgentMessage],
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None,
+        stream: EventStream[AgentEvent, list[AgentMessage]],
+        run_id: str,
+) -> None:
+    """跑 before_run，把 hook 注入的消息并进本轮上下文。
+
+    三处都要加，缺一处就坏：``current_context.messages``（这轮 LLM 要看到）、
+    ``new_messages``（返回值，宿主据此落档）、以及 message_start/end 事件
+    （``AgentSession._on_event`` 靠它写历史）。只进上下文不发事件的话，恢复
+    会话时上下文和历史就对不上了。
+    """
+    hooks = config.hooks
+    if hooks is None or not hooks.has("before_run"):
+        return
+
+    injected = await hooks.run_before_run(
+        {"lane": config.lane, "run_id": run_id, "prompt": list(prompts)},
+        abort_event=abort_event,
+    )
+    for message in injected:
+        # 官方 checkpoint.ts:56-58 的不变量：pending 的 assistant 消息会让
+        # 后续流程以为"还有没收尾的回复"，必须当场拦住而不是带着跑。
+        is_pending_assistant = (
+            message_role(message) == "assistant"
+            and getattr(message, "stop_reason", None) == "pending"
+        )
+        if is_pending_assistant:
+            raise ValueError("before_run returned a pending assistant message")
+        prompts.append(message)
+        current_context.messages.append(message)
+        new_messages.append(message)
+        stream.push({"type": "message_start", "message": message})
+        stream.push({"type": "message_end", "message": message})
 
 
 def agent_loop(
@@ -42,6 +84,8 @@ def agent_loop(
     stream = _create_agent_stream()
 
     async def _run() -> None:
+        # 一次 run 一个 id，hook 事件靠它把同一轮的多次触发串起来。
+        run_id = uuid.uuid4().hex
         new_messages: list[AgentMessage] = list(prompts)
         current_context = AgentContext(
             system_prompt=context.system_prompt,
@@ -57,8 +101,14 @@ def agent_loop(
                 stream.push({"type": "message_start", "message": prompt})
                 stream.push({"type": "message_end", "message": prompt})
 
+            # 注入放在 prompts 发完事件之后：注入的消息排在用户输入后面，
+            # 自己发自己的 message_start/end，不跟上面那个循环抢。
+            await _inject_before_run(
+                prompts, current_context, new_messages, config, abort_event, stream, run_id
+            )
+
             await _run_loop(
-                current_context, new_messages, config, abort_event, stream, stream_fn
+                current_context, new_messages, config, abort_event, stream, stream_fn, run_id
             )
         except Exception as exc:  # noqa: BLE001
             # 生产者兜底：任何意外异常都必须让流正常终止，
@@ -84,6 +134,7 @@ def agent_loop_continue(
     stream = _create_agent_stream()
 
     async def _run() -> None:
+        run_id = uuid.uuid4().hex
         new_messages: list[AgentMessage] = []
         current_context = AgentContext(
             system_prompt=context.system_prompt,
@@ -95,8 +146,14 @@ def agent_loop_continue(
         stream.push({"type": "turn_start"})
 
         try:
+            # /continue 也要走注入，否则中间件在续跑时静默失效。
+            # 这里没有新的用户输入，prompt 给空表——handler 看到的是"本轮没新增"。
+            await _inject_before_run(
+                [], current_context, new_messages, config, abort_event, stream, run_id
+            )
+
             await _run_loop(
-                current_context, new_messages, config, abort_event, stream, stream_fn
+                current_context, new_messages, config, abort_event, stream, stream_fn, run_id
             )
         except Exception as exc:  # noqa: BLE001
             _fail_with_error(stream, new_messages, exc, config, abort_event)
@@ -146,6 +203,30 @@ def _create_agent_stream() -> EventStream[AgentEvent, list[AgentMessage]]:
     )
 
 
+async def _run_before_run_end(
+        new_messages: list[AgentMessage],
+        config: AgentLoopConfig,
+        abort_event: asyncio.Event | None,
+        run_id: str,
+) -> UserMessage | None:
+    """跑 before_run_end，有 follow_up 就包成一条用户消息交回循环。
+
+    只负责造消息，不自己 push 事件也不 append——交回去走 ``pending_messages``
+    那条路，由循环统一发 message_start/end 并落档，省一份重复逻辑。
+    """
+    hooks = config.hooks
+    if hooks is None or not hooks.has("before_run_end"):
+        return None
+
+    follow_up = await hooks.run_before_run_end(
+        {"lane": config.lane, "run_id": run_id, "messages": list(new_messages)},
+        abort_event=abort_event,
+    )
+    if not follow_up:
+        return None
+    return UserMessage(content=follow_up)
+
+
 async def _run_loop(
         current_context: AgentContext,
         new_messages: list[AgentMessage],
@@ -153,6 +234,7 @@ async def _run_loop(
         abort_event: asyncio.Event | None,
         stream: EventStream[AgentEvent, list[AgentMessage]],
         stream_fn: StreamFn | None,
+        run_id: str = "",
 ) -> None:
     """事件流里的事件 生产者：作用：决定"要不要再调一次 LLM" """
     """
@@ -258,6 +340,16 @@ async def _run_loop(
         if follow_up_messages:
             pending_messages = follow_up_messages
             continue  # ← 模型以为下班了，发现队列里还有活，开新 turn
+
+        # before_run_end：工具循环真的跑完了，这时整轮消息才齐。
+        # 挂这里而不是 after_response——后者在工具循环里一轮能触发十几次。
+        # 它给的 follow_up 复用上面同一套队列机制，等于"再开一个 turn"。
+        hook_follow_up = await _run_before_run_end(
+            new_messages, config, abort_event, run_id
+        )
+        if hook_follow_up is not None:
+            pending_messages = [hook_follow_up]
+            continue
 
         break         # ← 真没活了，agent_end
 

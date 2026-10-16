@@ -22,6 +22,7 @@ import json
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Self
 
 from .types import (
     AgentMessage,
@@ -52,6 +53,28 @@ class CompactionSettings:
     # 压缩后大致保留的近期上下文 token。
     keep_recent_tokens: int = 20000
 
+    @classmethod
+    def for_window(cls, context_window: int, *, enabled: bool = True) -> Self:
+        """按窗口大小缩放预留与保留额度：预留 1/8，保留近期 1/4。
+
+        字段默认值（16384 / 20000）是按 128k 窗口定的绝对值，直接用在小窗口上会
+        坏掉两处：``window - reserve`` 变负数使 ``should_compact`` 恒为真；
+        ``keep_recent_tokens`` 比整个上下文还大，使切点计算永远攒不满而短路。
+        两者叠起来的表现是「每轮都判定要压、每轮都压不动」——空转且不报错。
+
+        窗口已知时用这个构造，不要用字段默认值。
+        """
+        if context_window <= 0:
+            raise ValueError(f"context_window 必须为正，收到 {context_window}")
+        return cls(
+            enabled=enabled,
+            reserve_tokens=max(_MIN_SCALED_TOKENS, context_window // 8),
+            keep_recent_tokens=max(_MIN_SCALED_TOKENS, context_window // 4),
+        )
+
+
+# 缩放下限：窗口极小时也得留出够写一条摘要的余量。
+_MIN_SCALED_TOKENS = 256
 
 DEFAULT_COMPACTION_SETTINGS = CompactionSettings()
 
@@ -144,9 +167,7 @@ def estimate_tokens(message: AgentMessage) -> int:
             elif isinstance(block, ThinkingContent):
                 total += _estimate_chars_as_tokens(block.thinking)
             elif isinstance(block, ToolCall):
-                total += _estimate_chars_as_tokens(
-                    block.name + _safe_json(block.arguments)
-                )
+                total += _estimate_chars_as_tokens(block.name + _safe_json(block.arguments))
         return total
     if role == "toolResult" and isinstance(message, ToolResultMessage):
         return _text_and_image_chars_as_tokens(message.content)
@@ -217,13 +238,24 @@ def estimate_context_tokens(messages: Sequence[AgentMessage]) -> ContextUsageEst
     )
 
 
-def should_compact(
-    context_tokens: int, context_window: int, settings: CompactionSettings
-) -> bool:
-    """上下文用量是否超过压缩阈值（窗口 - 预留）。"""
+def should_compact(context_tokens: int, context_window: int, settings: CompactionSettings) -> bool:
+    """上下文用量是否超过压缩阈值（窗口 - 预留）。
+
+    预留额度不小于窗口时阈值为负，判定会恒为真而切点又永远攒不满，表现为每轮
+    空转。这是配置错误，显式抛出——静默恒真极难排查。用
+    ``CompactionSettings.for_window()`` 可避免。
+    """
     if not settings.enabled:
         return False
-    return context_tokens > context_window - settings.reserve_tokens
+    threshold = context_window - settings.reserve_tokens
+    if threshold <= 0:
+        raise ValueError(
+            f"压缩阈值非正（窗口 {context_window} - 预留 "
+            f"{settings.reserve_tokens} = {threshold}）："
+            f"预留额度不应接近或超过窗口。改用 "
+            f"CompactionSettings.for_window({context_window})。"
+        )
+    return context_tokens > threshold
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +291,7 @@ def serialize_conversation(messages: Sequence[AgentMessage]) -> str:
                 if isinstance(block, ThinkingContent):
                     thinking.append(block.thinking)
                 elif isinstance(block, ToolCall):
-                    args = ", ".join(
-                        f"{k}={_safe_json(v)}" for k, v in block.arguments.items()
-                    )
+                    args = ", ".join(f"{k}={_safe_json(v)}" for k, v in block.arguments.items())
                     tool_calls.append(f"{block.name}({args})")
                 elif isinstance(block, TextContent):
                     has_text = True
@@ -274,9 +304,7 @@ def serialize_conversation(messages: Sequence[AgentMessage]) -> str:
         elif role == "toolResult" and isinstance(msg, ToolResultMessage):
             text = content_text(msg.content, "")
             if text:
-                parts.append(
-                    f"[Tool result]: {_truncate_for_summary(text, TOOL_RESULT_MAX_CHARS)}"
-                )
+                parts.append(f"[Tool result]: {_truncate_for_summary(text, TOOL_RESULT_MAX_CHARS)}")
     return "\n\n".join(parts)
 
 

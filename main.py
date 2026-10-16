@@ -40,9 +40,9 @@ from pi_agent.agent_core import (
 from pi_agent.agent_core.compaction import CompactionSettings
 from pi_agent.agent_core.types import AgentEvent
 from pi_agent.pi_ai import create_agent_stream_fn, create_default_registry
-from pi_agent.pi_ai.runtime import complete_simple
 from pi_agent.session import Context, SqliteSessionRepo, create_agent_session
 from pi_agent.session.factory import AgentSession
+from pi_agent.summarizer import LlmSummarizer
 from pi_agent.tools import (
     build_tools_prompt,
     create_all_tools,
@@ -166,45 +166,6 @@ def build_model() -> tuple[Model, Any]:
     return model, registry
 
 
-def make_summarizer(model: Model, registry: Any) -> Callable[[str], Any]:
-    """压缩用的摘要函数：用同一个模型起一次性调用，不带工具、不进主历史。"""
-    from pi_agent.agent_core.compaction import (
-        SUMMARIZATION_PROMPT,
-        SUMMARIZATION_SYSTEM_PROMPT,
-    )
-
-    async def summarize(transcript: str) -> str:
-        print("\n\033[90m[正在压缩上下文…]\033[0m", flush=True)
-        message = await complete_simple(
-            f"{transcript}\n\n{SUMMARIZATION_PROMPT}",
-            model=model,
-            registry=registry,
-            system_prompt=SUMMARIZATION_SYSTEM_PROMPT,
-        )
-        text = "\n".join(
-            b.text for b in message.content if isinstance(b, TextContent)
-        ).strip()
-        print("\033[90m[压缩完成]\033[0m", flush=True)
-        return text
-
-    return summarize
-
-
-def build_compaction_settings(context_window: int) -> CompactionSettings:
-    """按窗口大小缩放压缩参数。
-
-    默认的 reserve=16384 / keep_recent=20000 是按 128k 窗口定的。直接用在小窗口上
-    会出现两个毛病：阈值 `window - reserve` 变负数；且 keep_recent 比整个上下文还大，
-    使 find_cut_point 总是短路返回 0（无可摘要的 head）——表现为“永远不压缩”。
-    这里按比例取：预留 1/8、保留近期 1/4。
-    """
-    return CompactionSettings(
-        enabled=True,
-        reserve_tokens=max(256, context_window // 8),
-        keep_recent_tokens=max(256, context_window // 4),
-    )
-
-
 # ---------------------------------------------------------------------------
 # 命令
 # ---------------------------------------------------------------------------
@@ -259,11 +220,7 @@ async def handle_command(
             print("压缩未启用。")
         else:
             last = next(
-                (
-                    m
-                    for m in reversed(agent.state.messages)
-                    if isinstance(m, AssistantMessage)
-                ),
+                (m for m in reversed(agent.state.messages) if isinstance(m, AssistantMessage)),
                 None,
             )
             if last is None:
@@ -281,9 +238,7 @@ async def handle_command(
 # ---------------------------------------------------------------------------
 
 
-async def pick_session_id(
-    repo: SqliteSessionRepo, ctx: Context, args: Any
-) -> str | None:
+async def pick_session_id(repo: SqliteSessionRepo, ctx: Context, args: Any) -> str | None:
     if args.session:
         return str(args.session)
     if args.resume:
@@ -301,9 +256,7 @@ async def run() -> None:
     parser.add_argument("--session", help="续聊指定 session id")
     parser.add_argument("--resume", action="store_true", help="续聊最近一次会话")
     parser.add_argument("--list", action="store_true", help="列出所有会话后退出")
-    parser.add_argument(
-        "--no-compaction", action="store_true", help="关闭上下文自动压缩"
-    )
+    parser.add_argument("--no-compaction", action="store_true", help="关闭上下文自动压缩")
     parser.add_argument(
         "--db",
         type=Path,
@@ -368,7 +321,16 @@ async def run() -> None:
     agent.set_tools(tools)
     agent.subscribe(make_printer())
 
-    summarize = None if args.no_compaction else make_summarizer(model, registry)
+    # 摘要逻辑在 pi_agent/summarizer.py；这里只决定用哪个模型、怎么显示进度。
+    summarizer = (
+        None
+        if args.no_compaction
+        else LlmSummarizer(
+            model=model,
+            registry=registry,
+            on_progress=lambda stage: print(f"\n\033[90m[{stage}…]\033[0m", flush=True),
+        )
+    )
     session_id = await pick_session_id(repo, ctx, args)
 
     sess = await create_agent_session(
@@ -376,10 +338,10 @@ async def run() -> None:
         repo,
         ctx,
         session_id=session_id,
-        summarize=summarize,
+        summarize=summarizer,
         context_window=None if args.no_compaction else args.context_window,
         compaction_settings=(
-            None if args.no_compaction else build_compaction_settings(args.context_window)
+            None if args.no_compaction else CompactionSettings.for_window(args.context_window)
         ),
     )
     sid = sess.session.metadata.id

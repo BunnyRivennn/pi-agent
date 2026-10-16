@@ -26,6 +26,7 @@ from ..agent_core.compaction import (
     serialize_conversation,
     should_compact,
 )
+from ..agent_core.hooks import HookRegistry
 from ..agent_core.types import AgentMessage, AssistantMessage
 from .compaction import collect_retained_tail, find_cut_point
 from .context import build_session_context
@@ -61,11 +62,17 @@ class AgentSession:
         summarize: Summarize | None = None,
         context_window: int | None = None,
         compaction_settings: CompactionSettings | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
         self._agent = agent
         self._session = session
         self._branch = branch
         self._context = context
+        # 不注入则建一个空注册表：has() 恒假，热路径上零分支代价。
+        self._hooks = hooks if hooks is not None else HookRegistry()
+        # 回填给 agent：宿主通常先建 Agent 再建 session，循环里的插入点
+        # （before_run / before_run_end）读的是 config.hooks，不回填就全哑。
+        agent.set_hooks(self._hooks)
         self._pending: set[asyncio.Task[None]] = set()
         self._disposed = False
         # 压缩：仅当同时注入 summarize 与 context_window 时启用（否则零变化）。
@@ -77,6 +84,10 @@ class AgentSession:
         # 「取走即清空」使一轮内多次 LLM 调用只检查一次，结构性去重。
         self._last_assistant: AssistantMessage | None = None
         self._unsubscribe = agent.subscribe(self._on_event)
+
+    @property
+    def hooks(self) -> HookRegistry:
+        return self._hooks
 
     @property
     def compaction_enabled(self) -> bool:
@@ -176,14 +187,10 @@ class AgentSession:
 
         messages = await build_session_context(path, None)
         estimate = estimate_context_tokens(messages)
-        if not should_compact(
-            estimate.tokens, self._context_window, self._compaction_settings
-        ):
+        if not should_compact(estimate.tokens, self._context_window, self._compaction_settings):
             return False
 
-        cut = find_cut_point(
-            path, 0, len(path), self._compaction_settings.keep_recent_tokens
-        )
+        cut = find_cut_point(path, 0, len(path), self._compaction_settings.keep_recent_tokens)
         # 切点在最前 → 没有可摘要的历史，跳过（避免摘要空内容/自引用）。
         if cut.first_kept_entry_index <= 0:
             return False
@@ -192,12 +199,44 @@ class AgentSession:
         head_messages = await build_session_context(head, None)
         if not head_messages:
             return False
-        retained_tail = collect_retained_tail(
-            path, cut.first_kept_entry_index, len(path)
-        )
+        retained_tail = collect_retained_tail(path, cut.first_kept_entry_index, len(path))
 
         transcript = serialize_conversation(head_messages)
-        summary = await self._summarize(transcript)
+
+        # before_compaction：切点已定、摘要未生成时征询 hook（first-wins）。
+        # 放在这里而非 should_compact 之后，是为了让 hook 看到真实的 head/transcript
+        # ——它要替我们写摘要，就得看到被摘要的内容。
+        # decline → 本轮不压缩；给 summary → 用它并记 from_hook，跳过 LLM 调用。
+        summary: str | None = None
+        from_hook = False
+        if self._hooks.has("before_compaction"):
+            decision = await self._hooks.run_before_compaction(
+                {
+                    "lane": self._branch.name,
+                    "run_id": tip or "",
+                    # 本项目只实现了阈值触发；官方还有 manual / overflow 两路。
+                    "reason": "threshold",
+                    "preparation": {
+                        "messages_to_summarize": head_messages,
+                        "retained_tail": retained_tail,
+                        "tokens_before": estimate.tokens,
+                        "transcript": transcript,
+                        "branch": self._branch.name,
+                        "context_window": self._context_window,
+                    },
+                }
+            )
+            if decision is not None:
+                if decision.get("decline") is True:
+                    return False
+                compaction = decision.get("compaction")
+                hook_summary = compaction.get("summary") if compaction else None
+                if isinstance(hook_summary, str) and hook_summary:
+                    summary = hook_summary
+                    from_hook = True
+
+        if summary is None:
+            summary = await self._summarize(transcript)
 
         try:
             await self._session.append_compaction_to_branch(
@@ -207,6 +246,7 @@ class AgentSession:
                 tokens_before=estimate.tokens,
                 expected_tip=tip,
                 context=self._context,
+                from_hook=from_hook,
             )
         except CompactionRaceError:
             # tip 在生成摘要期间被推进：良性竞态，下一轮末重试。
@@ -280,9 +320,7 @@ async def _restore_messages(
     tip = await branch.get_tip_id(context)
     if tip is None:
         return 0
-    path = await session.scan_branch(
-        BranchScan(start=tip, order="oldestFirst"), context
-    )
+    path = await session.scan_branch(BranchScan(start=tip, order="oldestFirst"), context)
     messages = await build_session_context(path, None)
     if messages:
         agent.replace_messages(messages)
@@ -299,12 +337,14 @@ async def create_agent_session(
     summarize: Summarize | None = None,
     context_window: int | None = None,
     compaction_settings: CompactionSettings | None = None,
+    hooks: HookRegistry | None = None,
 ) -> AgentSession:
     """组合 Agent + 持久化会话。
 
     - session_id 为 None → 新建会话。
     - session_id 指向已存在会话 → 打开并自动恢复（历史消息 + laneConfig）。
     - 传入 summarize + context_window → 启用短期记忆压缩（每轮末自动检查）。
+    - 传入 hooks → 扩展可在 before_compaction 弃权或自带摘要。
     """
     session: StorageBackedSession | None = None
     if session_id is not None:
@@ -328,6 +368,7 @@ async def create_agent_session(
         summarize=summarize,
         context_window=context_window,
         compaction_settings=compaction_settings,
+        hooks=hooks,
     )
     await agent_session.save_lane_config()
     return agent_session

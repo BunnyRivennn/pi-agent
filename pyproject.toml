@@ -48,6 +48,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# live：真调外部 LLM 的测试。默认不跑——要花钱、要网络、结果还不确定。
+# 要跑：uv run pytest -m live
+markers = ["live: 需要真实 LLM 和 OPENAI_API_KEY（默认跳过）"]
+addopts = "-m 'not live'"
 
 [tool.ruff]
 line-length = 100

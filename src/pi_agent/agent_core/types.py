@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Any,
     Generic,
     Literal,
@@ -14,6 +15,10 @@ from typing import (
     TypeVar,
     runtime_checkable,
 )
+
+if TYPE_CHECKING:
+    # 只用于注解：hooks.py 不 import types.py，这个方向是安全的。
+    from .hooks import HookRegistry
 
 ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
 StopReason = Literal["stop", "length", "toolUse", "error", "aborted"]
@@ -209,6 +214,11 @@ class LlmContext:
 class AgentLoopConfig:
     model: Model
     convert_to_llm: ConvertToLlmFn
+    # hook 注册表。None 或空表时循环里零开销（每处插入点先 has() 再调）。
+    # 放 config 而非 Agent 字段：config 每轮 _execute 新建，注册表后挂也生效。
+    hooks: HookRegistry | None = None
+    # 事件里的 lane 名。本项目没有 lane/drive 运行时，扩展靠它区分执行流。
+    lane: str = "main"
     transform_context: TransformContextFn | None = None
     get_api_key: GetApiKeyFn | None = None
     get_steering_messages: GetMessagesFn | None = None

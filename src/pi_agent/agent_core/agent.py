@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 from .agent_loop import agent_loop, agent_loop_continue
+from .hooks import HookRegistry
 from .types import (
     AgentContext,
     AgentEvent,
@@ -65,6 +66,7 @@ class Agent:
         get_api_key: GetApiKeyFn | None = None,
         thinking_budgets: Mapping[str, int] | None = None,
         max_retry_delay_ms: int | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
         # 管理Agent的状态
         self._state = (
@@ -84,6 +86,7 @@ class Agent:
         self.get_api_key = get_api_key
         self._thinking_budgets = dict(thinking_budgets) if thinking_budgets else None
         self._max_retry_delay_ms = max_retry_delay_ms
+        self._hooks = hooks
 
         self._steering_queue: list[AgentMessage] = []
         self._follow_up_queue: list[AgentMessage] = []
@@ -154,6 +157,18 @@ class Agent:
 
     def set_thinking_level(self, level: ThinkingLevel) -> None:
         self._state.thinking_level = level
+
+    def set_hooks(self, hooks: HookRegistry | None) -> None:
+        """挂上 hook 注册表，下一轮 prompt 生效。
+
+        跟 ``set_tools`` 同一个路子：构造后再设。``AgentSession`` 建注册表时
+        会回填给 agent，宿主程序通常不用自己调。
+        """
+        self._hooks = hooks
+
+    @property
+    def hooks(self) -> HookRegistry | None:
+        return self._hooks
 
     def set_tools(self, tools: list[AgentTool]) -> None:
         self._state.tools = list(tools)
@@ -295,6 +310,7 @@ class Agent:
             get_api_key=self.get_api_key,
             get_steering_messages=self._pull_steering_messages,
             get_follow_up_messages=self._pull_follow_up_messages,
+            hooks=self._hooks,
         )
 
         try:
